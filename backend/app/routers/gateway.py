@@ -1,3 +1,5 @@
+# POST /v1/chat endpoint
+
 import uuid
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Header

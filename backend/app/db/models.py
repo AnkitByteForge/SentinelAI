@@ -1,3 +1,5 @@
+# ORM models (requests table)
+
 from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, func
 from sqlalchemy.dialects.sqlite import TEXT
 from app.db.database import Base
