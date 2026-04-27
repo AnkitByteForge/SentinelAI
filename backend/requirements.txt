@@ -1,0 +1,10 @@
+fastapi 
+uvicorn
+httpx
+python-dotenv
+qlalchemy
+asyncpg
+psycopg2-binary
+pydantic-settings
+alembic
+aiosqlite
