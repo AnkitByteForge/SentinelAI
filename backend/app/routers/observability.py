@@ -6,6 +6,7 @@ from app.db.database import get_db
 from app.models import LogsResponse, MetricsResponse
 from app.services.queries import get_logs, get_metrics
 from app.routers.gateway import verify_api_key   # reuse the same auth
+from app.services.cache import get_cache_stats
 
 from app.services.cost import get_pricing_table
 
@@ -43,3 +44,24 @@ async def pricing(_: str = Depends(verify_api_key)):
         "note": "Cost is calculated on every request using real token counts × these rates",
         "providers": get_pricing_table()
     }
+
+
+@router.get("/v1/cache/stats")
+async def cache_stats(
+    db: AsyncSession = Depends(get_db),
+    _:  str          = Depends(verify_api_key),
+):
+    return await get_cache_stats(db=db)
+
+
+@router.delete("/v1/cache/invalidate")
+async def invalidate_cache(
+    db: AsyncSession = Depends(get_db),
+    _:  str          = Depends(verify_api_key),
+):
+    """Mark all cache entries as stale. Useful for testing."""
+    from sqlalchemy import update as sql_update
+    from app.db.models import CacheEntry
+    await db.execute(sql_update(CacheEntry).values(is_stale=True))
+    await db.commit()
+    return {"message": "All cache entries invalidated"}
