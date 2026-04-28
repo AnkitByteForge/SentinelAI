@@ -7,6 +7,7 @@ from app.models import LogsResponse, MetricsResponse
 from app.services.queries import get_logs, get_metrics
 from app.routers.gateway import verify_api_key   # reuse the same auth
 from app.services.cache import get_cache_stats
+from app.services.circuit_breaker import registry as cb
 
 from app.services.cost import get_pricing_table
 
@@ -65,3 +66,18 @@ async def invalidate_cache(
     await db.execute(sql_update(CacheEntry).values(is_stale=True))
     await db.commit()
     return {"message": "All cache entries invalidated"}
+
+
+@router.post("/v1/circuit/{provider}/reset")
+async def reset_circuit(
+    provider: str,
+    _: str = Depends(verify_api_key),
+):
+    """Manually reset a circuit breaker — useful for testing and demos."""
+    cb.reset(provider)
+    return {"message": f"{provider} circuit reset to CLOSED"}
+
+@router.get("/v1/circuit/states")
+async def circuit_states(_: str = Depends(verify_api_key)):
+    """Current state of all circuit breakers."""
+    return cb.get_all_states()
