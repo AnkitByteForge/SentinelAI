@@ -3,6 +3,7 @@
 import httpx
 import time
 from app.config import settings
+from app.services.cost import calculate_cost
 
 # ─── Groq (OpenAI-compatible, free tier) ───────────────────────────
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -32,14 +33,17 @@ async def call_groq(messages: list[dict], model: str, max_tokens: int, temperatu
     choice = data["choices"][0]["message"]["content"]
     usage = data.get("usage", {})
 
+    input_tokens = usage.get("prompt_tokens", 0)
+    output_tokens = usage.get("completion_tokens", 0)
+
     return {
         "content": choice,
         "provider": "groq",
         "model": model,
-        "input_tokens": usage.get("prompt_tokens", 0),
-        "output_tokens": usage.get("completion_tokens", 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "latency_ms": latency_ms,
-        "cost_usd": 0.0,   # Groq free tier
+        "cost_usd": calculate_cost("groq", model, input_tokens, output_tokens),
     }
 
 
@@ -90,12 +94,15 @@ async def call_gemini(messages: list[dict], max_tokens: int, temperature: float)
     content = data["candidates"][0]["content"]["parts"][0]["text"]
     usage = data.get("usageMetadata", {})
 
+    input_tokens = usage.get("promptTokenCount", 0)
+    output_tokens = usage.get("candidatesTokenCount", 0)
+
     return {
         "content": content,
         "provider": "gemini",
         "model": model,
-        "input_tokens": usage.get("promptTokenCount", 0),
-        "output_tokens": usage.get("candidatesTokenCount", 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "latency_ms": latency_ms,
-        "cost_usd": 0.0,   # Gemini free tier
+        "cost_usd": calculate_cost("gemini", model, input_tokens, output_tokens),
     }

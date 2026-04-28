@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.routers import gateway
+from app.routers import observability
 from app.db.database import init_db
 
 @asynccontextmanager
@@ -18,6 +19,8 @@ app = FastAPI(
 )
 
 app.include_router(gateway.router)
+app.include_router(observability.router)
+
 
 @app.get("/health")
 async def health():
