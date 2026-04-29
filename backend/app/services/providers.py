@@ -66,9 +66,9 @@ def _convert_to_gemini_format(messages: list[dict]) -> tuple[str, list[dict]]:
     return system_prompt, contents
 
 async def call_gemini(messages: list[dict], max_tokens: int, temperature: float) -> dict:
-    """Call Gemini 1.5 Flash (free tier). Returns normalized response dict."""
+    """Call Gemini 2.5 Flash (free tier). Returns normalized response dict."""
     start = time.monotonic()
-    model = "gemini-1.5-flash"
+    model = "gemini-2.5-flash"
     system_prompt, contents = _convert_to_gemini_format(messages)
 
     payload = {

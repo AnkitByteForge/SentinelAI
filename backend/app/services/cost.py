@@ -10,10 +10,11 @@ PRICING = {
         "gemma2-9b-it":           {"input": 0.20,  "output": 0.20},
     },
     "gemini": {
-        # Google Gemini pricing
-        "gemini-1.5-flash":       {"input": 0.075, "output": 0.30},
-        "gemini-1.5-pro":         {"input": 3.50,  "output": 10.50},
-        "gemini-2.0-flash":       {"input": 0.10,  "output": 0.40},
+
+      "gemini-2.5-flash":      {"input": 0.15,  "output": 0.60},   # ← add
+      "gemini-2.5-flash-lite": {"input": 0.075, "output": 0.30},   # ← add
+      "gemini-2.0-flash":      {"input": 0.10,  "output": 0.40},
+      "gemini-1.5-flash":      {"input": 0.075, "output": 0.30},
     },
     "openai": {
         # For future reference / comparison
