@@ -1,4 +1,4 @@
-# Pydantic request/response models
+# Pydantic request/response model
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
