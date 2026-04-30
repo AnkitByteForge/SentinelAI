@@ -47,6 +47,8 @@ class LogEntry(BaseModel):
     status: str
     error_type: Optional[str] = None
     fallback_from: Optional[str] = None
+    prompt_preview: Optional[str] = None
+    response_preview: Optional[str] = None
     created_at: datetime
 
     class Config:

@@ -15,6 +15,26 @@ from app.config import settings
 router = APIRouter()
 
 
+def _truncate(s: str | None, n: int = 280) -> str | None:
+    if not s:
+        return None
+    s = s.strip()
+    if len(s) <= n:
+        return s
+    return s[: n - 1] + "…"
+
+
+def _prompt_preview(messages: list[dict]) -> str | None:
+    # Prefer the last user message (what engineers usually want to inspect).
+    for m in reversed(messages):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            return _truncate(m.get("content"))
+    # Fallback: last message content.
+    if messages and isinstance(messages[-1].get("content"), str):
+        return _truncate(messages[-1].get("content"))
+    return None
+
+
 def verify_api_key(authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid auth format")
@@ -64,6 +84,7 @@ async def chat(
     messages    = [m.model_dump() for m in request.messages]
     request_id  = str(uuid.uuid4())
     wall_start  = time.monotonic()
+    prompt_prev = _prompt_preview(messages)
 
     # ── 1. Semantic cache check ───────────────────────────────────────
     if not request.bypass_cache:
@@ -76,6 +97,8 @@ async def chat(
                 model=cached["model"], input_tokens=cached["input_tokens"],
                 output_tokens=cached["output_tokens"], cost_usd=0.0,
                 latency_ms=wall_latency, cache_hit=True, status="success",
+                prompt_preview=prompt_prev,
+                response_preview=_truncate(cached.get("content")),
             )
             db.add(log)
             await db.commit()
@@ -125,6 +148,8 @@ async def chat(
         log = RequestLog(
             id=request_id, provider="none", model=request.model,
             status="error", error_type="all_providers_failed",
+            prompt_preview=prompt_prev,
+            response_preview=None,
         )
         db.add(log)
         await db.commit()
@@ -149,6 +174,8 @@ async def chat(
         cost_usd=result["cost_usd"], latency_ms=wall_latency,
         cache_hit=False, status=status,
         fallback_from=fallback_from,
+        prompt_preview=prompt_prev,
+        response_preview=_truncate(result.get("content")),
     )
     db.add(log)
     await db.commit()

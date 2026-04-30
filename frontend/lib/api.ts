@@ -27,6 +27,8 @@ export interface LogEntry {
   status: string
   error_type: string | null
   fallback_from: string | null
+  prompt_preview?: string | null
+  response_preview?: string | null
   created_at: string
 }
 

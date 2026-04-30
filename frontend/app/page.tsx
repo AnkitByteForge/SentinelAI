@@ -49,6 +49,8 @@ interface LogEntry {
   status: string
   error_type: string | null
   fallback_from: string | null
+  prompt_preview?: string | null
+  response_preview?: string | null
   created_at: string
 }
 
@@ -94,6 +96,27 @@ function fmtTime(iso: string): string {
 
 function shortId(id: string): string {
   return id.slice(0, 8).toUpperCase()
+}
+
+function mean(nums: number[]): number {
+  if (nums.length === 0) return 0
+  return nums.reduce((a, b) => a + b, 0) / nums.length
+}
+
+function clampPct(x: number): number {
+  if (!Number.isFinite(x)) return 0
+  if (x < 0) return 0
+  if (x > 1) return 1
+  return x
+}
+
+function fmtPctPoints(p: number): string {
+  return `${p.toFixed(1)}%`
+}
+
+function safeDiv(a: number, b: number): number {
+  if (b === 0) return 0
+  return a / b
 }
 
 // ── API calls ─────────────────────────────────────────────────────────
@@ -150,6 +173,25 @@ function Dot({ color }: { color: string }) {
       display: 'inline-block', width: 7, height: 7, borderRadius: '50%',
       background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0,
     }} />
+  )
+}
+
+function InsightTag({ label, tone }: { label: string; tone?: 'neutral' | 'warn' }) {
+  const col = tone === 'warn' ? C.amber : C.dim
+  return (
+    <span style={{
+      display: 'inline-block',
+      fontSize: 10,
+      padding: '3px 8px',
+      borderRadius: 999,
+      letterSpacing: '0.02em',
+      color: col,
+      background: tone === 'warn' ? `${C.amber}08` : '#FFFFFF04',
+      border: `1px solid ${tone === 'warn' ? `${C.amber}22` : C.border}`,
+      whiteSpace: 'nowrap',
+    }}>
+      {label}
+    </span>
   )
 }
 
@@ -229,6 +271,219 @@ function MetricCard({
   )
 }
 
+function MiniStat({
+  k,
+  v,
+  sub,
+  c,
+}: { k: string; v: string; sub?: string; c: string }) {
+  return (
+    <div style={{
+      background: `${c}08`,
+      border: `1px solid ${c}22`,
+      borderRadius: 10,
+      padding: '10px 10px',
+      minHeight: 58,
+    }}>
+      <div style={{ fontSize: 8, color: C.dim, letterSpacing: '0.08em', marginBottom: 4 }}>{k}</div>
+      <div style={{
+        fontSize: 16,
+        fontWeight: 900,
+        color: c,
+        fontFamily: 'Syne, sans-serif',
+        letterSpacing: '-0.02em',
+      }}>
+        {v}
+      </div>
+      {sub && <div style={{ marginTop: 3, fontSize: 10, color: C.dim }}>{sub}</div>}
+    </div>
+  )
+}
+
+function Insight({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ marginTop: 10, fontSize: 11, color: C.dim, lineHeight: 1.35 }}>
+      {children}
+    </div>
+  )
+}
+
+function ImpactSummary({
+  cacheHitRate,
+  optimizedRequests,
+  costSavedUsd,
+  hitAvgMs,
+  missAvgMs,
+  fallbackEvents,
+}: {
+  cacheHitRate: number
+  optimizedRequests: number
+  costSavedUsd: number
+  hitAvgMs: number
+  missAvgMs: number
+  fallbackEvents: number
+}) {
+  const latencyReductionPct = missAvgMs > 0 ? clampPct((missAvgMs - hitAvgMs) / missAvgMs) : 0
+
+  const impactCards = [
+    {
+      label: 'Latency reduction',
+      value: fmtPctPoints(latencyReductionPct * 100),
+      sub: missAvgMs > 0 ? `${fmtMs(Math.round(missAvgMs))} → ${fmtMs(Math.round(hitAvgMs))}` : 'Waiting for cache/miss samples',
+      accent: C.cyan,
+    },
+    {
+      label: 'Cache hit rate',
+      value: fmtPct(cacheHitRate),
+      sub: 'Cache hits avoid LLM calls',
+      accent: C.emerald,
+    },
+    {
+      label: 'Est. cost saved',
+      value: fmtCost(costSavedUsd),
+      sub: 'Saved by serving cached responses',
+      accent: C.emerald,
+    },
+    {
+      label: 'Optimized requests',
+      value: String(optimizedRequests),
+      sub: fallbackEvents > 0 ? `${fallbackEvents} failovers absorbed` : 'Routed through caching + resiliency',
+      accent: C.violet,
+    },
+  ]
+
+  return (
+    <Card style={{ padding: '18px 22px' }}>
+      <SecTitle
+        label="Impact Summary"
+        sub="A quick narrative: SentinelAI improves speed, reduces cost, and absorbs failures"
+      />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        {impactCards.map((c, idx) => {
+          const primary = idx === 0
+          return (
+            <div
+              key={c.label}
+              style={{
+                gridColumn: primary ? 'span 2' : undefined,
+                borderRadius: 12,
+                padding: primary ? '16px 16px' : '12px 12px',
+                background: `${c.accent}${primary ? '0C' : '08'}`,
+                border: `1px solid ${c.accent}${primary ? '33' : '25'}`,
+                position: 'relative',
+              }}
+            >
+            <div style={{
+              position: 'absolute', top: 0, left: 0, right: 0, height: 2,
+              background: `linear-gradient(90deg, transparent, ${c.accent}70, transparent)`,
+            }} />
+            <div style={{
+              fontFamily: 'Syne, sans-serif',
+              fontSize: primary ? 34 : 22,
+              fontWeight: 900,
+              color: C.textHi,
+              letterSpacing: '-0.03em',
+              lineHeight: 1.05,
+            }}>
+              {c.value}
+            </div>
+            <div style={{
+              marginTop: primary ? 10 : 8,
+              fontSize: 10,
+              fontWeight: 700,
+              color: C.dim,
+              letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+            }}>
+              {c.label}
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11, color: `${c.accent}CC` }}>
+              {c.sub}
+            </div>
+            </div>
+          )
+        })}
+      </div>
+      <Insight>
+        Cache hits reduce latency by avoiding LLM calls; fallback ensures reliability when a provider fails.
+      </Insight>
+    </Card>
+  )
+}
+
+function LatencyComparison({
+  hitAvgMs,
+  missAvgMs,
+  hitCount,
+  missCount,
+}: {
+  hitAvgMs: number
+  missAvgMs: number
+  hitCount: number
+  missCount: number
+}) {
+  const improvementPct = missAvgMs > 0 ? clampPct((missAvgMs - hitAvgMs) / missAvgMs) : 0
+  const hasSamples = hitCount > 0 && missCount > 0
+
+  return (
+    <Card>
+      <SecTitle label="Latency: Cache vs Non‑Cache" sub="Comparison view that shows how the cache changes behavior" />
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr 1fr',
+        gap: 10,
+        alignItems: 'stretch',
+      }}>
+        <div style={{
+          padding: '12px 12px',
+          borderRadius: 10,
+          background: `${C.emerald}08`,
+          border: `1px solid ${C.emerald}25`,
+        }}>
+          <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em' }}>AVG (CACHE HIT)</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 900, color: C.emerald, fontFamily: 'Syne, sans-serif' }}>
+            {hasSamples ? fmtMs(Math.round(hitAvgMs)) : '—'}
+          </div>
+          <div style={{ marginTop: 4, fontSize: 11, color: C.dim }}>{hitCount} samples</div>
+        </div>
+
+        <div style={{
+          padding: '12px 12px',
+          borderRadius: 10,
+          background: `${C.amber}08`,
+          border: `1px solid ${C.amber}25`,
+        }}>
+          <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em' }}>AVG (CACHE MISS)</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 900, color: C.amber, fontFamily: 'Syne, sans-serif' }}>
+            {hasSamples ? fmtMs(Math.round(missAvgMs)) : '—'}
+          </div>
+          <div style={{ marginTop: 4, fontSize: 11, color: C.dim }}>{missCount} samples</div>
+        </div>
+
+        <div style={{
+          padding: '12px 12px',
+          borderRadius: 10,
+          background: `${C.cyan}08`,
+          border: `1px solid ${C.cyan}25`,
+        }}>
+          <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em' }}>IMPROVEMENT</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 900, color: C.cyan, fontFamily: 'Syne, sans-serif' }}>
+            {hasSamples ? fmtPctPoints(improvementPct * 100) : '—'}
+          </div>
+          <div style={{ marginTop: 4, fontSize: 11, color: C.dim }}>
+            {hasSamples ? 'Lower is better' : 'Need both hit and miss requests'}
+          </div>
+        </div>
+      </div>
+
+      <Insight>
+        Cache hits reduce latency by returning a stored response; cache misses include provider processing time.
+      </Insight>
+    </Card>
+  )
+}
+
 // ── Request pipeline flow ─────────────────────────────────────────────
 function PipelineFlow({ log }: { log: LogEntry | null }) {
   if (!log) {
@@ -246,32 +501,49 @@ function PipelineFlow({ log }: { log: LogEntry | null }) {
   const fallback = !!log.fallback_from
   const failed   = log.status === 'error'
 
+  const pathIdx = hit ? new Set([0, 1, 3]) : new Set([0, 1, 2, 3])
+
   const nodes = [
-    { label: 'REQUEST',   detail: '',                                        active: true,  color: C.cyan    },
-    { label: 'CACHE',     detail: hit ? 'HIT ✓' : 'MISS ✗',                 active: true,  color: hit ? C.emerald : C.amber },
-    { label: 'LLM CALL',  detail: hit ? 'SKIPPED' : log.provider?.toUpperCase(), active: !hit, color: hit ? C.dim : (failed ? C.rose : C.violet) },
-    { label: 'RESPONSE',  detail: failed ? 'ERROR' : `${fmtMs(log.latency_ms)}`, active: true, color: failed ? C.rose : C.emerald },
+    { label: 'REQUEST',   detail: '',                                             active: true,  color: C.cyan,    path: true },
+    { label: 'CACHE',     detail: hit ? 'HIT ✓' : 'MISS ✗',                      active: true,  color: hit ? C.emerald : C.amber, path: true },
+    { label: 'LLM CALL',  detail: hit ? 'SKIPPED' : (log.provider || '—').toUpperCase(), active: !hit, color: hit ? C.dim : (failed ? C.rose : C.violet), path: !hit },
+    { label: 'RESPONSE',  detail: failed ? 'ERROR' : `${fmtMs(log.latency_ms)}`,  active: true,  color: failed ? C.rose : (fallback ? C.amber : C.emerald), path: true },
   ]
 
   return (
     <Card>
       <SecTitle label="Request Pipeline" sub="Live flow of last request" />
 
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        <Pill label={hit ? 'CACHE HIT' : 'CACHE MISS'} color={hit ? C.emerald : C.amber} />
+        {!hit && <Pill label="LLM CALLED" color={failed ? C.rose : C.violet} />}
+        {fallback && <Pill label="FAILOVER" color={C.amber} />}
+        {failed && <Pill label="ERROR" color={C.rose} />}
+      </div>
+
       {/* Flow nodes */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 20 }}>
         {nodes.map((n, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
             <div style={{
-              flex: 1, border: `1px solid ${n.active ? n.color : C.border}`,
+              flex: 1, border: `1px solid ${(pathIdx.has(i) && n.active) ? n.color : C.border}`,
               borderRadius: 8, padding: '10px 6px', textAlign: 'center',
-              background: n.active ? `${n.color}0C` : 'transparent',
-              opacity: n.active ? 1 : 0.35, transition: 'all 0.3s',
+              background: (pathIdx.has(i) && n.active) ? `${n.color}12` : 'transparent',
+              opacity: n.active ? 1 : 0.35,
+              boxShadow: (pathIdx.has(i) && n.active) ? `0 0 18px ${n.color}12` : 'none',
+              transition: 'all 0.25s',
             }}>
               <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: n.color }}>{n.label}</div>
               {n.detail && <div style={{ fontSize: 9, color: n.color, marginTop: 3, opacity: 0.8 }}>{n.detail}</div>}
             </div>
             {i < nodes.length - 1 && (
-              <div style={{ width: 20, textAlign: 'center', color: C.cyan, opacity: 0.4, fontSize: 14, flexShrink: 0 }}>›</div>
+              <div style={{
+                width: 20, textAlign: 'center',
+                color: (pathIdx.has(i) && pathIdx.has(i + 1)) ? C.cyan : C.dim,
+                opacity: (pathIdx.has(i) && pathIdx.has(i + 1)) ? 0.9 : 0.35,
+                fontSize: 14, flexShrink: 0,
+                transition: 'all 0.25s',
+              }}>›</div>
             )}
           </div>
         ))}
@@ -304,6 +576,10 @@ function PipelineFlow({ log }: { log: LogEntry | null }) {
           ⚡ FAILOVER — {log.fallback_from?.toUpperCase()} failed → {log.provider?.toUpperCase()} responded
         </div>
       )}
+
+      <Insight>
+        Cache hit path skips the LLM call; cache miss path includes provider processing time.
+      </Insight>
     </Card>
   )
 }
@@ -376,6 +652,16 @@ function LatencyChart({ logs }: { logs: LogEntry[] }) {
     hit:     l.cache_hit,
   }))
 
+  const lat = data.map(d => d.latency).filter(n => Number.isFinite(n))
+  const sorted = [...lat].sort((a, b) => a - b)
+  const median = sorted.length
+    ? (sorted.length % 2 === 1
+        ? sorted[(sorted.length - 1) / 2]
+        : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2)
+    : 0
+  const maxLat = lat.length ? Math.max(...lat) : 0
+  const spike = median > 0 && maxLat > Math.max(4000, median * 3)
+
   return (
     <Card>
       <SecTitle label="Latency Timeline" sub="Last 30 requests — green = cache hit, purple = LLM call" />
@@ -407,7 +693,17 @@ function LatencyChart({ logs }: { logs: LogEntry[] }) {
       <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 11, color: C.dim }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><Dot color={C.emerald} /> Cache hit (~15ms)</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><Dot color={C.violet}  /> LLM call (~2000ms)</span>
+        {spike && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+            <Pill label="SPIKE" color={C.rose} />
+            <span style={{ fontSize: 11, color: C.dim }}>Latency spike detected</span>
+          </span>
+        )}
       </div>
+
+      <Insight>
+        Latency spikes typically come from provider processing time (cache misses) rather than cached responses.
+      </Insight>
     </Card>
   )
 }
@@ -448,7 +744,7 @@ function CachePanel({ metrics, cache }: { metrics: Metrics | null; cache: CacheS
           ))}
           <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
             <div style={{ fontSize: 10, color: C.dim, marginBottom: 2, letterSpacing: '0.06em' }}>COST SAVED</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.emerald, fontFamily: 'Syne, sans-serif' }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: C.emerald, fontFamily: 'Syne, sans-serif' }}>
               {fmtCost(cache?.total_saved_usd || 0)}
             </div>
           </div>
@@ -470,49 +766,76 @@ function CachePanel({ metrics, cache }: { metrics: Metrics | null; cache: CacheS
           ))}
         </div>
       )}
+
+      <Insight>
+        Higher hit rate means fewer provider calls — faster responses and lower spend.
+      </Insight>
     </Card>
   )
 }
 
 // ── Provider chart ────────────────────────────────────────────────────
-function ProviderChart({ metrics }: { metrics: Metrics | null }) {
+function ProviderChart({ metrics, logs }: { metrics: Metrics | null; logs: LogEntry[] }) {
+  const fallbacksByProvider = logs
+    .filter(l => !!l.fallback_from && l.provider)
+    .reduce<Record<string, number>>((acc, l) => {
+      acc[l.provider] = (acc[l.provider] || 0) + 1
+      return acc
+    }, {})
+
   const data = metrics
-    ? Object.entries(metrics.providers).map(([name, s]) => ({
-        name:     name.charAt(0).toUpperCase() + name.slice(1),
-        requests: s.requests,
-        errors:   s.errors,
-        latency:  Math.round(s.avg_latency_ms),
-        color:    name === 'groq' ? C.violet : C.blue,
-      }))
+    ? Object.entries(metrics.providers).map(([name, s]) => {
+        const fallbackServed = fallbacksByProvider[name] || 0
+        const normalServed = Math.max(0, s.requests - fallbackServed)
+        return {
+          name:     name.charAt(0).toUpperCase() + name.slice(1),
+          key:      name,
+          requests: s.requests,
+          normal:   normalServed,
+          fallbacks: fallbackServed,
+          errors:   s.errors,
+          latency:  Math.round(s.avg_latency_ms),
+          pct:      0,
+          color:    name === 'groq' ? C.violet : C.blue,
+        }
+      })
     : []
+
+  const total = data.reduce((a, b) => a + b.requests, 0)
+  data.forEach(d => {
+    d.pct = total > 0 ? Math.round((d.requests / total) * 100) : 0
+  })
 
   return (
     <Card>
-      <SecTitle label="Provider Usage" sub="Requests per provider with error overlay" />
+      <SecTitle label="Provider Usage" sub="Usage share (%) and fallback-served counts" />
       {data.length > 0 ? (
         <>
-          <div style={{ height: 160 }}>
+          <div style={{ height: 140 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.dim }} />
                 <YAxis tick={{ fontSize: 10, fill: C.dim }} />
                 <Tooltip content={<ChartTip />} />
-                <Bar dataKey="requests" name="Requests" radius={[4, 4, 0, 0]}>
+                <Bar dataKey="normal" name="Requests" stackId="a" radius={[4, 4, 0, 0]}>
                   {data.map((d, i) => <Cell key={i} fill={d.color} opacity={0.8} />)}
                 </Bar>
-                <Bar dataKey="errors" name="Errors" radius={[4, 4, 0, 0]} fill={C.rose} opacity={0.7} />
+                <Bar dataKey="fallbacks" name="Fallback served" stackId="a" radius={[4, 4, 0, 0]} fill={C.amber} opacity={0.8} />
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8, marginTop: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8, marginTop: 8 }}>
             {data.map(d => (
               <div key={d.name} style={{
-                padding: '8px 10px', borderRadius: 8,
+                padding: '7px 10px', borderRadius: 8,
                 background: `${d.color}08`, border: `1px solid ${d.color}25`,
               }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: C.textHi, marginBottom: 3 }}>{d.name}</div>
-                <div style={{ fontSize: 10, color: C.dim }}>{d.requests} req · {d.latency}ms avg</div>
+                <div style={{ fontSize: 10, color: C.dim }}>
+                  {d.requests} req · {d.pct}% · {d.latency}ms avg
+                </div>
+                {d.fallbacks > 0 && <div style={{ fontSize: 10, color: C.amber, marginTop: 2 }}>{d.fallbacks} served via fallback</div>}
                 {d.errors > 0 && <div style={{ fontSize: 10, color: C.rose, marginTop: 2 }}>{d.errors} errors</div>}
               </div>
             ))}
@@ -523,6 +846,10 @@ function ProviderChart({ metrics }: { metrics: Metrics | null }) {
           No provider data in window
         </div>
       )}
+
+      <Insight>
+        Errors and latency help explain provider behavior; circuit breakers and fallback prevent outages from reaching users.
+      </Insight>
     </Card>
   )
 }
@@ -534,6 +861,12 @@ function LogModal({ log, onClose }: { log: LogEntry; onClose: () => void }) {
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
   }, [onClose])
+
+  const promptText = (log.prompt_preview || '').trim()
+  const responseText = (log.response_preview || '').trim()
+  const promptPlaceholder = 'Not available for this request'
+  const responsePlaceholder = log.cache_hit ? 'Not available for this request (cache hit / older log)' : 'Not available for this request'
+  const previewsMissing = !promptText && !responseText
 
   const fields = [
     { k: 'Provider',     v: log.provider?.toUpperCase() || '—',                    c: log.provider === 'groq' ? C.violet : C.blue    },
@@ -614,6 +947,34 @@ function LogModal({ log, onClose }: { log: LogEntry; onClose: () => void }) {
         }}>
           {new Date(log.created_at).toISOString()}
         </div>
+
+        {previewsMissing && (
+          <div style={{ marginTop: 8, fontSize: 10, color: C.dim, lineHeight: 1.35 }}>
+            Previews are not stored for some older requests (or non-text payloads). New requests should show previews.
+          </div>
+        )}
+
+        {/* Prompt/Response preview */}
+        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+          <div style={{
+            padding: '10px 12px', borderRadius: 10,
+            background: '#FFFFFF04', border: `1px solid ${C.border}`,
+          }}>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em', marginBottom: 6 }}>PROMPT (PREVIEW)</div>
+            <div style={{ fontSize: 12, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.35 }}>
+              {promptText || promptPlaceholder}
+            </div>
+          </div>
+          <div style={{
+            padding: '10px 12px', borderRadius: 10,
+            background: '#FFFFFF04', border: `1px solid ${C.border}`,
+          }}>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em', marginBottom: 6 }}>RESPONSE (PREVIEW)</div>
+            <div style={{ fontSize: 12, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.35 }}>
+              {responseText || responsePlaceholder}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -649,7 +1010,7 @@ function LogsTable({ logs, onSelect }: { logs: LogEntry[]; onSelect: (l: LogEntr
     <Card>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
-        <SecTitle label="Request Logs" sub={`${filtered.length} of ${logs.length} entries`} />
+        <SecTitle label="Request Logs" sub={`Showing recent requests · ${filtered.length} of ${logs.length} entries (scroll for more)`} />
         <div style={{ display: 'flex', gap: 8 }}>
           <select
             value={statusF}
@@ -680,7 +1041,7 @@ function LogsTable({ logs, onSelect }: { logs: LogEntry[]; onSelect: (l: LogEntr
       </div>
 
       {/* Table */}
-      <div style={{ overflowX: 'auto' }}>
+      <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 520 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
@@ -711,7 +1072,7 @@ function LogsTable({ logs, onSelect }: { logs: LogEntry[]; onSelect: (l: LogEntr
             </tr>
           </thead>
           <tbody>
-            {filtered.slice(0, 50).map(log => (
+            {filtered.map(log => (
               <tr
                 key={log.id}
                 onClick={() => onSelect(log)}
@@ -768,9 +1129,11 @@ export default function Dashboard() {
   const [win,        setWin]        = useState('24h')
   const [loading,    setLoading]    = useState(true)
   const [lastUpdate, setLastUpdate] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
   const [selLog,     setSelLog]     = useState<LogEntry | null>(null)
 
   const refresh = useCallback(async () => {
+    setRefreshing(true)
     const [m, l, cs, ci] = await Promise.all([
       getMetrics(win), getLogs(100), getCacheStats(), getCircuits(),
     ])
@@ -780,6 +1143,7 @@ export default function Dashboard() {
     setCircuits(ci)
     setLastUpdate(new Date().toLocaleTimeString())
     setLoading(false)
+    setRefreshing(false)
   }, [win])
 
   useEffect(() => { refresh() }, [refresh])
@@ -789,6 +1153,82 @@ export default function Dashboard() {
   }, [refresh])
 
   const anyOpen = Object.values(circuits).some(c => c.state !== 'closed')
+
+  const windowTotal = metrics?.total_requests ?? logs.length
+  const cacheHitRate = metrics?.cache_hit_rate ?? (logs.length ? safeDiv(logs.filter(l => l.cache_hit).length, logs.length) : 0)
+  const optimizedRequests = metrics ? Math.round(metrics.total_requests * metrics.cache_hit_rate) : logs.filter(l => l.cache_hit).length
+  const fallbackEvents = metrics?.fallback_requests ?? logs.filter(l => !!l.fallback_from).length
+  const costSavedUsd = cache?.total_saved_usd ?? 0
+
+  const hitLatencies = logs.filter(l => l.cache_hit).map(l => l.latency_ms)
+  const missLatencies = logs.filter(l => !l.cache_hit).map(l => l.latency_ms)
+  const hitAvgMs = mean(hitLatencies)
+  const missAvgMs = mean(missLatencies)
+
+  const errorRate = metrics
+    ? safeDiv(metrics.failed_requests, Math.max(1, metrics.total_requests))
+    : safeDiv(logs.filter(l => l.status !== 'success').length, Math.max(1, logs.length))
+
+  // Status should reflect *recent* behavior (not the full selected window).
+  const RECENT_N = 20
+  const recent = logs.slice(0, RECENT_N)
+  const recentFallbackCount = recent.filter(l => !!l.fallback_from || l.status === 'fallback').length
+  const recentErrorCount = recent.filter(l => l.status === 'error').length
+  const openCircuits = Object.values(circuits).filter(c => c.state === 'open').length
+
+  const recentLat = recent
+    .filter(l => l.status !== 'error')
+    .map(l => l.latency_ms)
+    .filter(n => Number.isFinite(n))
+
+  const recentSorted = [...recentLat].sort((a, b) => a - b)
+  const recentMedian = recentSorted.length
+    ? (recentSorted.length % 2 === 1
+        ? recentSorted[(recentSorted.length - 1) / 2]
+        : (recentSorted[recentSorted.length / 2 - 1] + recentSorted[recentSorted.length / 2]) / 2)
+    : 0
+  const recentMax = recentLat.length ? Math.max(...recentLat) : 0
+  const recentSpike = recentMedian > 0 && recentMax > Math.max(4000, recentMedian * 3)
+
+  const recentTotal = recent.length
+  const recentErrorRate = safeDiv(recentErrorCount, Math.max(1, recentTotal))
+  const consecutiveFailures = (() => {
+    let streak = 0
+    for (const l of recent) {
+      if (l.status === 'error') streak += 1
+      else break
+    }
+    return streak
+  })()
+
+  // Avoid classifying CRITICAL on tiny samples (common during local testing).
+  const highErrorRate = recentTotal >= 10
+    ? recentErrorRate >= 0.2
+    : recentErrorCount >= 3
+
+  const hasRecentFailure = recentErrorCount > 0
+  const hasRecentFallback = recentFallbackCount > 0
+
+  const healthInsights = (() => {
+    const tags: Array<{ label: string; tone?: 'neutral' | 'warn' }> = []
+
+    if (recentTotal === 0) {
+      tags.push({ label: 'No recent traffic', tone: 'neutral' })
+      return tags
+    }
+
+    // Prefer factual, non-alarmist summaries.
+    if (openCircuits === 0 && recentErrorCount === 0) tags.push({ label: 'All providers operational' })
+    if (recentErrorCount === 0) tags.push({ label: 'No recent failures detected' })
+    else tags.push({ label: `Recent failures observed (${recentErrorCount})`, tone: 'warn' })
+
+    if (recentFallbackCount > 0) tags.push({ label: `Fallback activity observed (${recentFallbackCount})`, tone: 'warn' })
+    if (recentSpike) tags.push({ label: 'Latency spikes detected', tone: 'warn' })
+    if (openCircuits > 0) tags.push({ label: `Circuit open (${openCircuits})`, tone: 'warn' })
+
+    // Keep it short.
+    return tags.slice(0, 4)
+  })()
 
   return (
     <>
@@ -826,20 +1266,32 @@ export default function Dashboard() {
 
           {/* Right controls */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            {/* System status */}
+            {/* System health insights (subtle, factual) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', maxWidth: 520 }}>
+              <div style={{ fontSize: 10, color: C.dim, letterSpacing: '0.06em' }}>System Health Insights:</div>
+              {healthInsights.map((t, i) => (
+                <InsightTag key={i} label={t.label} tone={t.tone} />
+              ))}
+              {recentTotal > 0 && (
+                <span style={{ fontSize: 10, color: C.dim }}>
+                  (last {recentTotal} requests)
+                </span>
+              )}
+            </div>
+
+            {/* Auto-refresh indicator */}
             <div style={{
               display: 'flex', alignItems: 'center', gap: 7,
-              padding: '6px 12px', borderRadius: 8, fontSize: 11,
-              background: anyOpen ? `${C.rose}08`    : `${C.emerald}08`,
-              border:     `1px solid ${anyOpen ? C.rose : C.emerald}30`,
-              color:       anyOpen ? C.rose : C.emerald,
+              padding: '6px 10px', borderRadius: 8, fontSize: 11,
+              background: '#FFFFFF04', border: `1px solid ${C.border}`,
+              color: C.dim,
             }}>
               <span style={{
                 display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-                background: anyOpen ? C.rose : C.emerald,
-                boxShadow: `0 0 6px ${anyOpen ? C.rose : C.emerald}`,
+                background: refreshing ? C.cyan : C.dim,
+                boxShadow: refreshing ? `0 0 8px ${C.cyan}` : 'none',
               }} />
-              {anyOpen ? 'DEGRADED' : 'OPERATIONAL'}
+              {refreshing ? 'Refreshing…' : 'Auto‑refresh 15s'}
             </div>
 
             {/* Time window */}
@@ -872,33 +1324,77 @@ export default function Dashboard() {
                 color: C.dim, cursor: 'pointer', fontFamily: 'JetBrains Mono, monospace',
               }}
             >
-              ↻ {lastUpdate || 'Loading...'}
+              ↻ {lastUpdate ? `Last updated ${lastUpdate}` : 'Loading…'}
             </button>
           </div>
         </div>
 
-        {/* ── Metric cards ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
-          <MetricCard
-            label="Total Requests" accent={C.cyan}
-            value={String(metrics?.total_requests ?? 0)}
-            sub={`${metrics?.successful_requests ?? 0} successful`}
+        {/* ── Impact Summary (Primary) ── */}
+        <div style={{ marginBottom: 18 }}>
+          <ImpactSummary
+            cacheHitRate={cacheHitRate}
+            optimizedRequests={optimizedRequests}
+            costSavedUsd={costSavedUsd}
+            hitAvgMs={hitAvgMs}
+            missAvgMs={missAvgMs}
+            fallbackEvents={fallbackEvents}
           />
-          <MetricCard
-            label="Cache Hit Rate" accent={C.emerald}
-            value={fmtPct(metrics?.cache_hit_rate ?? 0)}
-            sub={`${fmtCost(cache?.total_saved_usd ?? 0)} saved`}
+        </div>
+
+        {/* ── Fallback + latency comparison (Primary) ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 12, marginBottom: 18 }}>
+          <Card>
+            <SecTitle label="Fallback Visibility" sub="Failover events that protect reliability" />
+            <div style={{
+              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+              padding: '12px 12px', borderRadius: 10,
+              background: `${fallbackEvents > 0 ? C.amber : C.emerald}08`,
+              border: `1px solid ${(fallbackEvents > 0 ? C.amber : C.emerald)}25`,
+            }}>
+              <div>
+                <div style={{ fontSize: 9, color: C.dim, letterSpacing: '0.08em' }}>FALLBACK EVENTS</div>
+                <div style={{ marginTop: 6, fontSize: 24, fontWeight: 900, color: fallbackEvents > 0 ? C.amber : C.emerald, fontFamily: 'Syne, sans-serif' }}>
+                  {fallbackEvents}
+                </div>
+              </div>
+              <Pill label={fallbackEvents > 0 ? 'ACTIVE' : 'NONE'} color={fallbackEvents > 0 ? C.amber : C.emerald} />
+            </div>
+            <Insight>
+              Recent: {recentFallbackCount} in last {recent.length} requests.
+              {' '}Fallback ensures reliability when a provider fails; it should be rare but visible.
+            </Insight>
+          </Card>
+
+          <LatencyComparison
+            hitAvgMs={hitAvgMs}
+            missAvgMs={missAvgMs}
+            hitCount={hitLatencies.length}
+            missCount={missLatencies.length}
           />
-          <MetricCard
-            label="Avg Latency" accent={C.amber}
-            value={fmtMs(Math.round(metrics?.latency.avg_ms ?? 0))}
-            sub={`p95: ${fmtMs(metrics?.latency.p95_ms ?? 0)}`}
-          />
-          <MetricCard
-            label="Est. API Cost" accent={C.violet}
-            value={fmtCost(metrics?.total_cost_usd ?? 0)}
-            sub={`window: ${win}`}
-          />
+        </div>
+
+        {/* ── Window overview (Tertiary; compressed) ── */}
+        <div style={{ marginBottom: 18 }}>
+          <Card style={{ padding: '12px 14px' }}>
+            <div style={{
+              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+              marginBottom: 10,
+            }}>
+              <div style={{
+                fontFamily: 'Syne, sans-serif', fontWeight: 700, fontSize: 10,
+                letterSpacing: '0.1em', textTransform: 'uppercase', color: C.dim,
+              }}>
+                Window Overview
+              </div>
+              <div style={{ fontSize: 10, color: C.dim }}>window: {win}</div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+              <MiniStat k="TOTAL" v={String(windowTotal ?? 0)} c={C.cyan} />
+              <MiniStat k="P95" v={fmtMs(Math.round(metrics?.latency.p95_ms ?? 0))} c={C.amber} />
+              <MiniStat k="ERROR" v={fmtPct(errorRate)} c={errorRate > 0.2 ? C.rose : errorRate > 0.05 ? C.amber : C.emerald} />
+              <MiniStat k="COST" v={fmtCost(metrics?.total_cost_usd ?? 0)} c={C.violet} />
+            </div>
+          </Card>
         </div>
 
         {/* ── Pipeline + Circuits ── */}
@@ -915,7 +1411,7 @@ export default function Dashboard() {
 
         {/* ── Provider chart ── */}
         <div style={{ marginBottom: 12 }}>
-          <ProviderChart metrics={metrics} />
+          <ProviderChart metrics={metrics} logs={logs} />
         </div>
 
         {/* ── Logs table ── */}

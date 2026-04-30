@@ -20,6 +20,8 @@ class RequestLog(Base):
     status        = Column(String, default="success")   # success | error | fallback
     error_type    = Column(String, nullable=True)
     fallback_from = Column(String, nullable=True)
+    prompt_preview  = Column(TEXT, nullable=True)
+    response_preview= Column(TEXT, nullable=True)
     created_at    = Column(DateTime, server_default=func.now())
 
 
