@@ -10,6 +10,8 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 async def call_groq(messages: list[dict], model: str, max_tokens: int, temperature: float) -> dict:
     """Call Groq API. Returns normalized response dict."""
+    if not settings.groq_api_key:
+        raise ValueError("Missing GROQ_API_KEY")
     start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -67,6 +69,8 @@ def _convert_to_gemini_format(messages: list[dict]) -> tuple[str, list[dict]]:
 
 async def call_gemini(messages: list[dict], max_tokens: int, temperature: float) -> dict:
     """Call Gemini 2.5 Flash (free tier). Returns normalized response dict."""
+    if not settings.gemini_api_key:
+        raise ValueError("Missing GEMINI_API_KEY")
     start = time.monotonic()
     model = "gemini-2.5-flash"
     system_prompt, contents = _convert_to_gemini_format(messages)

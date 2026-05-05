@@ -1,7 +1,6 @@
 import hashlib
 import json
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 import uuid
@@ -11,14 +10,36 @@ from app.services.cost import calculate_cost
 
 # ── Load model once at import time (not per request) ─────────────────
 # Downloads ~90MB on first run, then cached locally forever
-_model = SentenceTransformer("all-MiniLM-L6-v2")
+_model = None
+_model_load_error: str | None = None
+
+
+def _get_model():
+    global _model, _model_load_error
+    if _model is not None:
+        return _model
+    if _model_load_error is not None:
+        return None
+
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        return _model
+    except Exception as e:
+        _model_load_error = str(e)
+        return None
 
 SIMILARITY_THRESHOLD = 0.92   # tunable — explained below
 
 
 def _embed(text: str) -> list[float]:
     """Generate 384-dim embedding vector for a text string."""
-    vector = _model.encode(text, normalize_embeddings=True)
+    model = _get_model()
+    if model is None:
+        raise RuntimeError("Embedding model unavailable")
+
+    vector = model.encode(text, normalize_embeddings=True)
     return vector.tolist()
 
 
@@ -91,7 +112,10 @@ async def check_cache(
         }
 
     # ── Stage 2: semantic similarity search ───────────────────────────
-    query_embedding = _embed(cache_text)
+    try:
+        query_embedding = _embed(cache_text)
+    except Exception:
+        return None
 
     all_stmt = select(CacheEntry).where(CacheEntry.is_stale == False)
     all_rows = (await db.execute(all_stmt)).scalars().all()
@@ -137,7 +161,10 @@ async def store_in_cache(
     """
     cache_text    = _messages_to_cache_key(messages)
     exact_hash    = _prompt_hash(cache_text)
-    embedding_vec = _embed(cache_text)
+    try:
+        embedding_vec = _embed(cache_text)
+    except Exception:
+        return
 
     # Check if this exact hash already exists (race condition guard)
     existing = (await db.execute(
