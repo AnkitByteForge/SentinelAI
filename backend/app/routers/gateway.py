@@ -6,11 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatRequest, ChatResponse, UsageInfo, MetaInfo
 from app.services.providers import call_groq, call_gemini
-from app.services.cache import check_cache, store_in_cache
+from app.services.cache import check_cache
 from app.services.circuit_breaker import registry as cb          # ← new
 from app.db.database import get_db
-from app.db.models import RequestLog
 from app.config import settings
+
+# Import Celery task (fire-and-forget post-processing)
+from app.tasks import post_process_task
 
 router = APIRouter()
 
@@ -32,7 +34,7 @@ def _prompt_preview(messages: list[dict]) -> str | None:
     # Fallback: last message content.
     if messages and isinstance(messages[-1].get("content"), str):
         return _truncate(messages[-1].get("content"))
-    return None
+    return None 
 
 
 def verify_api_key(authorization: str = Header(...)):
@@ -85,6 +87,9 @@ async def chat(
     request_id  = str(uuid.uuid4())
     wall_start  = time.monotonic()
     prompt_prev = _prompt_preview(messages)
+    fallback_from: str | None = None
+    status: str = "success"
+    error_type: str | None = None
 
     # ── 1. Semantic cache check ───────────────────────────────────────
     if not request.bypass_cache:
@@ -92,16 +97,25 @@ async def chat(
 
         if cached:
             wall_latency = int((time.monotonic() - wall_start) * 1000)
-            log = RequestLog(
-                id=request_id, provider=cached["provider"],
-                model=cached["model"], input_tokens=cached["input_tokens"],
-                output_tokens=cached["output_tokens"], cost_usd=0.0,
-                latency_ms=wall_latency, cache_hit=True, status="success",
+
+            # Fire background task — don't await DB/cache writes.
+            post_process_task.delay(
+                request_id=request_id,
+                provider=cached["provider"],
+                model=cached["model"],
+                input_tokens=cached["input_tokens"],
+                output_tokens=cached["output_tokens"],
+                cost_usd=0.0,
+                latency_ms=wall_latency,
+                cache_hit=True,
+                status="success",
+                error_type=None,
+                fallback_from=None,
+                messages=messages,
+                response=None,  # no response to cache — already cached
                 prompt_preview=prompt_prev,
                 response_preview=_truncate(cached.get("content")),
             )
-            db.add(log)
-            await db.commit()
 
             return ChatResponse(
                 id=request_id, content=cached["content"],
@@ -114,9 +128,7 @@ async def chat(
             )
 
     # ── 2. Try Groq (with circuit breaker) ───────────────────────────
-    result       = None
-    used_provider= None
-    fallback_from= None
+    result = None
 
     result = await _try_provider(
         "groq",
@@ -127,7 +139,7 @@ async def chat(
     )
 
     if result:
-        used_provider = "groq"
+        status = "success"
 
     # ── 3. Try Gemini if Groq failed or was open ──────────────────────
     if result is None:
@@ -141,18 +153,27 @@ async def chat(
             )
         )
         if result:
-            used_provider = "gemini"
+            status = "fallback"
 
     # ── 4. All providers failed ───────────────────────────────────────
     if result is None:
-        log = RequestLog(
-            id=request_id, provider="none", model=request.model,
-            status="error", error_type="all_providers_failed",
+        post_process_task.delay(
+            request_id=request_id,
+            provider="none",
+            model=request.model,
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            latency_ms=int((time.monotonic() - wall_start) * 1000),
+            cache_hit=False,
+            status="error",
+            error_type="all_providers_failed",
+            fallback_from=fallback_from,
+            messages=messages,
+            response=None,
             prompt_preview=prompt_prev,
             response_preview=None,
         )
-        db.add(log)
-        await db.commit()
         raise HTTPException(
             status_code=503,
             detail={
@@ -162,25 +183,9 @@ async def chat(
         )
 
     wall_latency = int((time.monotonic() - wall_start) * 1000)
-    status       = "fallback" if fallback_from else "success"
 
-    # ── 5. Store in cache ─────────────────────────────────────────────
-    await store_in_cache(db=db, messages=messages, response=result)
-
-    # ── 6. Log request ────────────────────────────────────────────────
-    log = RequestLog(
-        id=request_id, provider=result["provider"], model=result["model"],
-        input_tokens=result["input_tokens"], output_tokens=result["output_tokens"],
-        cost_usd=result["cost_usd"], latency_ms=wall_latency,
-        cache_hit=False, status=status,
-        fallback_from=fallback_from,
-        prompt_preview=prompt_prev,
-        response_preview=_truncate(result.get("content")),
-    )
-    db.add(log)
-    await db.commit()
-
-    return ChatResponse(
+    # ── 5. Return response FIRST ─────────────────────────────────────
+    response_obj = ChatResponse(
         id=request_id, content=result["content"],
         provider=result["provider"], model=result["model"],
         usage=UsageInfo(input_tokens=result["input_tokens"],
@@ -189,3 +194,24 @@ async def chat(
         meta=MetaInfo(cache_hit=False, latency_ms=wall_latency,
                       provider=result["provider"], fallback=fallback_from),
     )
+
+    # ── 6. Fire background task AFTER building response ──────────────
+    post_process_task.delay(
+        request_id=request_id,
+        provider=result["provider"],
+        model=result["model"],
+        input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+        cost_usd=result["cost_usd"],
+        latency_ms=wall_latency,
+        cache_hit=False,
+        status=status,
+        error_type=error_type,
+        fallback_from=fallback_from,
+        messages=messages,
+        response=result,
+        prompt_preview=prompt_prev,
+        response_preview=_truncate(result.get("content")),
+    )
+
+    return response_obj

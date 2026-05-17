@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+import redis as redis_client
 
 from app.db.database import get_db
 from app.models import LogsResponse, MetricsResponse
@@ -81,3 +82,25 @@ async def reset_circuit(
 async def circuit_states(_: str = Depends(verify_api_key)):
     """Current state of all circuit breakers."""
     return cb.get_all_states()
+
+
+@router.get("/v1/worker/stats")
+async def worker_stats(_: str = Depends(verify_api_key)):
+    """
+    Returns Celery queue depth and worker status from Redis.
+    Used by dashboard to show async processing health.
+    """
+    try:
+        r = redis_client.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+        queue_depth = r.llen("celery")   # default Celery queue name
+        return {
+            "status":       "connected",
+            "queue_depth":  queue_depth,
+            "broker":       "redis://localhost:6379/0",
+        }
+    except Exception as e:
+        return {
+            "status":      "disconnected",
+            "queue_depth": 0,
+            "error":       str(e),
+        }
