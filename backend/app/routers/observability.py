@@ -9,6 +9,7 @@ from app.services.queries import get_logs, get_metrics
 from app.routers.gateway import verify_api_key   # reuse the same auth
 from app.services.cache import get_cache_stats
 from app.services.circuit_breaker import registry as cb
+from app.worker import celery_app
 
 from app.services.cost import get_pricing_table
 
@@ -92,15 +93,17 @@ async def worker_stats(_: str = Depends(verify_api_key)):
     """
     try:
         r = redis_client.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-        queue_depth = r.llen("celery")   # default Celery queue name
-        return {
-            "status":       "connected",
-            "queue_depth":  queue_depth,
-            "broker":       "redis://localhost:6379/0",
-        }
-    except Exception as e:
-        return {
-            "status":      "disconnected",
-            "queue_depth": 0,
-            "error":       str(e),
-        }
+        r.ping()
+
+        inspector = celery_app.control.inspect(timeout=1)
+        if not inspector:
+            return {"status": "down", "queue_depth": 0}
+
+        ping = inspector.ping() or {}
+        if len(ping) == 0:
+            return {"status": "down", "queue_depth": 0}
+
+        queue_depth = r.llen("celery")
+        return {"status": "connected", "queue_depth": queue_depth}
+    except Exception:
+        return {"status": "down", "queue_depth": 0}

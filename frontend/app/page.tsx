@@ -68,6 +68,11 @@ interface CircuitState {
   last_failure: number
 }
 
+interface WorkerStats {
+  status: string
+  queue_depth: number
+}
+
 // ── Formatters ────────────────────────────────────────────────────────
 function fmtMs(ms: number): string {
   if (ms === 0) return '0ms'
@@ -153,6 +158,14 @@ async function getCircuits(): Promise<Record<string, CircuitState>> {
   } catch { return {} }
 }
 
+async function getWorkerStats(): Promise<WorkerStats | null> {
+  try {
+    const r = await fetch(`${BASE}/v1/worker/stats`, { headers: HEADERS })
+    if (!r.ok) return null
+    return r.json()
+  } catch { return null }
+}
+
 // ── Small UI pieces ───────────────────────────────────────────────────
 function Pill({ label, color }: { label: string; color: string }) {
   return (
@@ -192,6 +205,29 @@ function InsightTag({ label, tone }: { label: string; tone?: 'neutral' | 'warn' 
     }}>
       {label}
     </span>
+  )
+}
+
+function WorkerStatus({ stats }: { stats: WorkerStats | null }) {
+  const isUp = stats?.status === 'connected'
+  const col = isUp ? C.emerald : C.rose
+  const queueDepth = stats?.queue_depth ?? 0
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '6px 10px', borderRadius: 8, fontSize: 11,
+      background: `${col}10`, border: `1px solid ${col}35`,
+      color: col,
+    }}>
+      <Dot color={col} />
+      <span style={{ fontWeight: 700, letterSpacing: '0.06em' }}>{isUp ? 'LIVE' : 'DOWN'}</span>
+      {queueDepth > 0 && (
+        <span style={{ color: C.text, fontSize: 10 }}>
+          queue: {queueDepth}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -1126,6 +1162,7 @@ export default function Dashboard() {
   const [logs,       setLogs]       = useState<LogEntry[]>([])
   const [cache,      setCache]      = useState<CacheStats | null>(null)
   const [circuits,   setCircuits]   = useState<Record<string, CircuitState>>({})
+  const [workerStats, setWorkerStats] = useState<WorkerStats | null>(null)
   const [win,        setWin]        = useState('24h')
   const [loading,    setLoading]    = useState(true)
   const [lastUpdate, setLastUpdate] = useState('')
@@ -1134,13 +1171,14 @@ export default function Dashboard() {
 
   const refresh = useCallback(async () => {
     setRefreshing(true)
-    const [m, l, cs, ci] = await Promise.all([
-      getMetrics(win), getLogs(100), getCacheStats(), getCircuits(),
+    const [m, l, cs, ci, ws] = await Promise.all([
+      getMetrics(win), getLogs(100), getCacheStats(), getCircuits(), getWorkerStats(),
     ])
     if (m)  setMetrics(m)
     if (l)  setLogs(l)
     if (cs) setCache(cs)
     setCircuits(ci)
+    setWorkerStats(ws)
     setLastUpdate(new Date().toLocaleTimeString())
     setLoading(false)
     setRefreshing(false)
@@ -1293,6 +1331,8 @@ export default function Dashboard() {
               }} />
               {refreshing ? 'Refreshing…' : 'Auto‑refresh 15s'}
             </div>
+
+            <WorkerStatus stats={workerStats} />
 
             {/* Time window */}
             <div style={{ display: 'flex', gap: 4 }}>
