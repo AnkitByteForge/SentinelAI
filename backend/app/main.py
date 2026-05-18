@@ -3,15 +3,28 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
 from app.routers import gateway
 from app.routers import observability
 from app.db.database import init_db
 from app.services.circuit_breaker import registry as cb 
+from app.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()      # creates DB tables on startup
-    yield
+    if settings.preload_embedding_model:
+        from app.services.cache import warmup_embedding_model
+
+        # Run in a worker thread to avoid blocking the event loop.
+        await asyncio.to_thread(warmup_embedding_model)
+
+    try:
+        yield
+    finally:
+        from app.services.providers import aclose_http_clients
+
+        await aclose_http_clients()
 
 app = FastAPI(
     title="SentinelAI Gateway",

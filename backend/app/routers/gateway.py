@@ -86,6 +86,7 @@ async def chat(
     messages    = [m.model_dump() for m in request.messages]
     request_id  = str(uuid.uuid4())
     wall_start  = time.monotonic()
+    stage: dict[str, int] = {}
     prompt_prev = _prompt_preview(messages)
     fallback_from: str | None = None
     status: str = "success"
@@ -93,12 +94,15 @@ async def chat(
 
     # ── 1. Semantic cache check ───────────────────────────────────────
     if not request.bypass_cache:
+        t_cache = time.monotonic()
         cached = await check_cache(db=db, messages=messages)
+        stage["cache_check_ms"] = int((time.monotonic() - t_cache) * 1000)
 
         if cached:
             wall_latency = int((time.monotonic() - wall_start) * 1000)
 
             # Fire background task — don't await DB/cache writes.
+            task_start = time.monotonic()
             post_process_task.delay(
                 request_id=request_id,
                 provider=cached["provider"],
@@ -116,6 +120,17 @@ async def chat(
                 prompt_preview=prompt_prev,
                 response_preview=_truncate(cached.get("content")),
             )
+            task_queue_ms = int((time.monotonic() - task_start) * 1000)
+            print(f"[Async] Task queued in {task_queue_ms}ms")
+
+            if settings.log_stage_timings:
+                total_ms = int((time.monotonic() - wall_start) * 1000)
+                print(
+                    "[Timing] "
+                    f"id={request_id} cache_hit=true total_ms={total_ms} "
+                    f"cache_check_ms={stage.get('cache_check_ms')} "
+                    f"task_queue_ms={task_queue_ms}"
+                )
 
             return ChatResponse(
                 id=request_id, content=cached["content"],
@@ -130,6 +145,7 @@ async def chat(
     # ── 2. Try Groq (with circuit breaker) ───────────────────────────
     result = None
 
+    t_groq = time.monotonic()
     result = await _try_provider(
         "groq",
         lambda: call_groq(
@@ -137,6 +153,7 @@ async def chat(
             max_tokens=request.max_tokens, temperature=request.temperature,
         )
     )
+    stage["groq_ms"] = int((time.monotonic() - t_groq) * 1000)
 
     if result:
         status = "success"
@@ -144,6 +161,7 @@ async def chat(
     # ── 3. Try Gemini if Groq failed or was open ──────────────────────
     if result is None:
         fallback_from = "groq"
+        t_gemini = time.monotonic()
         result = await _try_provider(
             "gemini",
             lambda: call_gemini(
@@ -152,11 +170,13 @@ async def chat(
                 temperature=request.temperature,
             )
         )
+        stage["gemini_ms"] = int((time.monotonic() - t_gemini) * 1000)
         if result:
             status = "fallback"
 
     # ── 4. All providers failed ───────────────────────────────────────
     if result is None:
+        task_start = time.monotonic()
         post_process_task.delay(
             request_id=request_id,
             provider="none",
@@ -174,6 +194,17 @@ async def chat(
             prompt_preview=prompt_prev,
             response_preview=None,
         )
+        task_queue_ms = int((time.monotonic() - task_start) * 1000)
+        print(f"[Async] Task queued in {task_queue_ms}ms")
+
+        if settings.log_stage_timings:
+            total_ms = int((time.monotonic() - wall_start) * 1000)
+            print(
+                "[Timing] "
+                f"id={request_id} cache_hit=false status=error total_ms={total_ms} "
+                f"cache_check_ms={stage.get('cache_check_ms')} groq_ms={stage.get('groq_ms')} "
+                f"gemini_ms={stage.get('gemini_ms')} task_queue_ms={task_queue_ms}"
+            )
         raise HTTPException(
             status_code=503,
             detail={
@@ -196,6 +227,7 @@ async def chat(
     )
 
     # ── 6. Fire background task AFTER building response ──────────────
+    task_start = time.monotonic()
     post_process_task.delay(
         request_id=request_id,
         provider=result["provider"],
@@ -213,5 +245,16 @@ async def chat(
         prompt_preview=prompt_prev,
         response_preview=_truncate(result.get("content")),
     )
+    task_queue_ms = int((time.monotonic() - task_start) * 1000)
+    print(f"[Async] Task queued in {task_queue_ms}ms")
+
+    if settings.log_stage_timings:
+        total_ms = int((time.monotonic() - wall_start) * 1000)
+        print(
+            "[Timing] "
+            f"id={request_id} cache_hit=false status={status} total_ms={total_ms} "
+            f"cache_check_ms={stage.get('cache_check_ms')} groq_ms={stage.get('groq_ms')} "
+            f"gemini_ms={stage.get('gemini_ms')} task_queue_ms={task_queue_ms}"
+        )
 
     return response_obj

@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     api_key: str = "sentinel-dev-key-123"
 
+    # Performance / profiling toggles
+    # - PRELOAD_EMBEDDING_MODEL=true  => load SentenceTransformer at process start
+    # - LOG_STAGE_TIMINGS=true        => print per-stage timings in /v1/chat
+    preload_embedding_model: bool = False
+    log_stage_timings: bool = False
+
     class Config:
         env_file = ".env"
 

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -29,6 +30,25 @@ def _get_model():
     except Exception as e:
         _model_load_error = str(e)
         return None
+
+
+def warmup_embedding_model() -> bool:
+    """Best-effort warmup so first request/task doesn't pay model-load cost."""
+    start = time.monotonic()
+    model = _get_model()
+    if model is None:
+        return False
+
+    # Force a tiny encode to load weights/tokenizer fully.
+    try:
+        model.encode("warmup", normalize_embeddings=True)
+    except Exception:
+        # Even if encode fails, we at least attempted to load.
+        pass
+
+    ms = int((time.monotonic() - start) * 1000)
+    print(f"[Embeddings] Warmup completed in {ms}ms")
+    return True
 
 SIMILARITY_THRESHOLD = 0.92   # tunable — explained below
 

@@ -2,8 +2,33 @@
 
 import httpx
 import time
+import asyncio
 from app.config import settings
 from app.services.cost import calculate_cost
+
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is not None:
+        return _client
+    async with _client_lock:
+        if _client is None:
+            _client = httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0, connect=5.0),
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                headers={"User-Agent": "SentinelAI-Gateway/0.1"},
+            )
+        return _client
+
+
+async def aclose_http_clients() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
 
 # ─── Groq (OpenAI-compatible, free tier) ───────────────────────────
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -14,22 +39,22 @@ async def call_groq(messages: list[dict], model: str, max_tokens: int, temperatu
         raise ValueError("Missing GROQ_API_KEY")
     start = time.monotonic()
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            f"{GROQ_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.groq_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = await _get_client()
+    resp = await client.post(
+        f"{GROQ_BASE_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {settings.groq_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     latency_ms = int((time.monotonic() - start) * 1000)
     choice = data["choices"][0]["message"]["content"]
@@ -85,14 +110,14 @@ async def call_gemini(messages: list[dict], max_tokens: int, temperature: float)
     if system_prompt:
         payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(
-            f"{GEMINI_BASE_URL}/models/{model}:generateContent",
-            params={"key": settings.gemini_api_key},
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = await _get_client()
+    resp = await client.post(
+        f"{GEMINI_BASE_URL}/models/{model}:generateContent",
+        params={"key": settings.gemini_api_key},
+        json=payload,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     latency_ms = int((time.monotonic() - start) * 1000)
     content = data["candidates"][0]["content"]["parts"][0]["text"]

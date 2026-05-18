@@ -1,4 +1,7 @@
 from celery import Celery
+from celery.signals import worker_init
+
+from app.config import settings
 
 # ── Celery app instance ───────────────────────────────────────────────
 # broker  = where tasks are queued (Redis)
@@ -31,3 +34,16 @@ celery_app.conf.update(
     task_acks_late        = True,
     task_reject_on_worker_lost = True,
 )
+
+
+@worker_init.connect
+def _warmup_embeddings_on_worker_init(**_kwargs):
+    """Optional: preload SentenceTransformer inside the Celery worker process."""
+    if not settings.preload_embedding_model:
+        return
+    try:
+        from app.services.cache import warmup_embedding_model
+
+        warmup_embedding_model()
+    except Exception as e:
+        print(f"[Embeddings] Warmup failed: {e}")
