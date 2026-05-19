@@ -5,6 +5,8 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     gemini_api_key: str = ""
     database_url: str = "sqlite+aiosqlite:///./sentinelai.db"
+    postgres_url:   str = "postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai"
+
     environment: str = "development"
     api_key: str = "sentinel-dev-key-123"
 

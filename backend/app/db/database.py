@@ -1,12 +1,23 @@
- # SQLAlchemy setup
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from app.config import settings
 
-engine = create_async_engine(settings.database_url, echo=False)
+# ── Engine ────────────────────────────────────────────────────────────
+# pool_pre_ping=True — verifies connection is alive before using it
+# pool_size=10       — up to 10 concurrent DB connections
+# max_overflow=20    — allow 20 extra connections under spike load
+engine = create_async_engine(
+    settings.postgres_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+)
 
 AsyncSessionLocal = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
 )
 
 class Base(DeclarativeBase):
@@ -17,20 +28,14 @@ async def get_db():
         yield session
 
 async def init_db():
+    """Create all tables. Will be replaced by Alembic in Step 3."""
     async with engine.begin() as conn:
-        from app.db.models import RequestLog   # import here to avoid circular
+        # Enable pgvector extension first — idempotent
+        from sqlalchemy import text
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.commit()
+
+    # Create tables
+    async with engine.begin() as conn:
+        from app.db.models import RequestLog, CacheEntry
         await conn.run_sync(Base.metadata.create_all)
-
-        # SQLite doesn't auto-migrate schema. Add new observability columns if missing.
-        try:
-            result = await conn.exec_driver_sql("PRAGMA table_info(requests)")
-            rows = result.all()
-            existing = {r[1] for r in rows}  # (cid, name, type, notnull, dflt_value, pk)
-
-            if "prompt_preview" not in existing:
-                await conn.exec_driver_sql("ALTER TABLE requests ADD COLUMN prompt_preview TEXT")
-            if "response_preview" not in existing:
-                await conn.exec_driver_sql("ALTER TABLE requests ADD COLUMN response_preview TEXT")
-        except Exception:
-            # Best-effort migration; if PRAGMA/ALTER fails we keep serving without previews.
-            pass
