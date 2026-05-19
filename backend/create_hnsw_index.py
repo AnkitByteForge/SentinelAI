@@ -8,10 +8,17 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency for local runs
+    load_dotenv = None
+
 
 def _get_database_url() -> str:
     """Resolve DB URL from env or app settings and normalize async driver."""
-    env_url = os.getenv("DATABASE_URL")
+    if load_dotenv is not None:
+        load_dotenv()
+    env_url = os.getenv("POSTGRES_URL")
     if env_url:
         url = env_url
     else:
@@ -21,7 +28,7 @@ def _get_database_url() -> str:
             url = settings.database_url
         except Exception as e:
             raise RuntimeError(
-                "DATABASE_URL not set and app.config.settings unavailable"
+                "POSTGRES_URL not set and app.config.settings unavailable"
             ) from e
 
     if url.startswith("postgresql://"):
