@@ -42,6 +42,7 @@ SentinelAI addresses all three with one gateway: cache what's already been asked
 
 ## Architecture
 
+```mermaid
 ---
 config:
   layout: elk
