@@ -202,7 +202,7 @@ flowchart TD
 
     %% ==================== LINKS ====================
 
-    linkStyle default stroke:#64748b,stroke-width:1.5px 
+    linkStyle default stroke:#64748b,stroke-width:1.5px
 ```
 
 ## System design decisions
