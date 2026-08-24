@@ -42,57 +42,166 @@ SentinelAI addresses all three with one gateway: cache what's already been asked
 
 ## Architecture
 
-```mermaid
+---
+config:
+  layout: elk
+  theme: neutral
+  flowchart:
+    curve: basis
+    htmlLabels: true
+---
+
 flowchart TD
+
     Client(["Client / Dashboard<br/>POST /v1/chat"]) --> Auth
 
-    subgraph GW["Gateway Layer — FastAPI (routers/gateway.py)"]
-        Auth["verify_api_key<br/>Bearer token check"]
-        Auth --> CacheCheck["check_cache()"]
+    %% ==================== GATEWAY ====================
+    subgraph GW["Gateway Layer · FastAPI"]
+        Auth["verify_api_key<br/>Bearer token check"] --> CacheCheck["check_cache()"]
     end
 
-    subgraph CACHE["Cache Layer — services/cache.py"]
+    %% ==================== CACHE ====================
+    subgraph CACHE["Cache Layer · services/cache.py"]
+
         CacheCheck --> ExactHit{"Exact SHA-256<br/>hash match?"}
-        ExactHit -- "no" --> Embed["Embed prompt<br/>all-MiniLM-L6-v2 · 384-dim"]
+
+        ExactHit -->|yes| CacheHit["Serve cached response<br/>~15–50 ms"]
+
+        ExactHit -->|no| Embed["Embed prompt<br/>all-MiniLM-L6-v2 · 384-dim"]
+
         Embed --> HNSW[("pgvector HNSW index<br/>cosine distance search")]
-        HNSW --> SimCheck{"similarity >= 0.92?"}
+
+        HNSW --> SimCheck{"Similarity ≥ 0.92?"}
+
+        SimCheck -->|yes| CacheHit
+
+        SimCheck -->|no| GroqCB
+
     end
 
-    ExactHit -- "yes" --> CacheHit["Serve cached response<br/>~15-50ms"]
-    SimCheck -- "yes" --> CacheHit
-    SimCheck -- "no" --> GroqCB
 
-    subgraph PROV["Provider Layer — services/providers.py + circuit_breaker.py"]
+    %% ==================== PROVIDERS ====================
+    subgraph PROV["Provider Layer · services/providers.py"]
+
         GroqCB{"Groq circuit<br/>CLOSED / HALF_OPEN?"}
-        GroqCB -- "yes" --> GroqCall["Call Groq<br/>llama-3.1-8b-instant"]
-        GroqCB -- "no (OPEN)" --> GeminiCB
-        GroqCall -- "success" --> Success["Build ChatResponse"]
-        GroqCall -- "failure" --> RecordFail["record_failure('groq')"]
+
+        GroqCB -->|yes| GroqCall["Call Groq<br/>llama-3.1-8b-instant"]
+
+        GroqCB -->|no - OPEN| GeminiCB
+
+        GroqCall -->|success| Success["Build ChatResponse"]
+
+        GroqCall -->|failure| RecordFail["record_failure('groq')"]
+
         RecordFail --> GeminiCB{"Gemini circuit<br/>CLOSED / HALF_OPEN?"}
-        GeminiCB -- "yes" --> GeminiCall["Call Gemini<br/>gemini-2.5-flash"]
-        GeminiCB -- "no (OPEN)" --> AllDown["503 — all providers unavailable"]
-        GeminiCall -- "success" --> Success
-        GeminiCall -- "failure" --> AllDown
+
+        GeminiCB -->|yes| GeminiCall["Call Gemini<br/>gemini-2.5-flash"]
+
+        GeminiCB -->|no - OPEN| AllDown["503 - all providers unavailable"]
+
+        GeminiCall -->|success| Success
+
+        GeminiCall -->|failure| AllDown
+
     end
 
+
+    %% ==================== RESPONSE ====================
     Success --> Response["Return response to client"]
+
     CacheHit --> Response
 
-    Response -. "post_process_task.delay(...)<br/>fire-and-forget" .-> Broker
+    Response -.->|"post_process_task.delay() - fire-and-forget"| Broker
 
-    subgraph ASYNC["Async Layer — Celery + Redis"]
-        Broker[("Redis<br/>broker db0 / result backend db1")]
-        Broker --> Worker["Celery worker<br/>(solo pool)"]
+
+    %% ==================== ASYNC ====================
+    subgraph ASYNC["Async Layer · Celery + Redis"]
+
+        Broker[("Redis<br/>broker db0 · result backend db1")]
+
+        Broker --> Worker["Celery worker<br/>solo pool"]
+
     end
 
-    subgraph STORE["Storage Layer — PostgreSQL + pgvector"]
+
+    %% ==================== STORAGE ====================
+    subgraph STORE["Storage Layer · PostgreSQL + pgvector"]
+
         Worker --> WriteLog[("requests table<br/>RequestLog")]
+
         Worker --> WriteCache[("cache_entries table<br/>embedding + response")]
+
     end
 
-    Dash["Dashboard — Next.js (app/page.tsx)"] -- "GET /v1/metrics /v1/logs<br/>/v1/cache/stats /v1/circuit/states" --> GW
+
+    %% ==================== DASHBOARD ====================
+    Dash["Dashboard · Next.js<br/>app/page.tsx"]
+
+    Dash -->|"GET /v1/metrics · /v1/logs<br/>/v1/cache/stats · /v1/circuit/states"| GW
+
     WriteLog -.-> Dash
+
     WriteCache -.-> Dash
+
+
+    %% ==================== STYLES ====================
+
+    classDef client fill:#eef2ff,stroke:#818cf8,stroke-width:2px,color:#1e1b4b;
+
+    classDef gateway fill:#f0fdfa,stroke:#2dd4bf,stroke-width:2px,color:#134e4a;
+
+    classDef cache fill:#ecfeff,stroke:#22d3ee,stroke-width:2px,color:#164e63;
+
+    classDef provider fill:#f5f3ff,stroke:#a78bfa,stroke-width:2px,color:#3b0764;
+
+    classDef async fill:#fff7ed,stroke:#fb923c,stroke-width:2px,color:#7c2d12;
+
+    classDef storage fill:#f0fdf4,stroke:#4ade80,stroke-width:2px,color:#14532d;
+
+    classDef decision fill:#fefce8,stroke:#facc15,stroke-width:2px,color:#713f12;
+
+    classDef error fill:#fff1f2,stroke:#fb7185,stroke-width:2px,color:#881337;
+
+    classDef response fill:#f0f9ff,stroke:#38bdf8,stroke-width:2px,color:#0c4a6e;
+
+
+    %% ==================== APPLY CLASSES ====================
+
+    class Client,Dash client;
+
+    class Auth,CacheCheck gateway;
+
+    class ExactHit,SimCheck,GroqCB,GeminiCB decision;
+
+    class Embed,HNSW,CacheHit cache;
+
+    class GroqCall,RecordFail,GeminiCall provider;
+
+    class AllDown error;
+
+    class Success,Response response;
+
+    class Broker,Worker async;
+
+    class WriteLog,WriteCache storage;
+
+
+    %% ==================== SUBGRAPH STYLES ====================
+
+    style GW fill:#f0fdfa,stroke:#2dd4bf,stroke-width:2px
+
+    style CACHE fill:#ecfeff,stroke:#22d3ee,stroke-width:2px
+
+    style PROV fill:#f5f3ff,stroke:#a78bfa,stroke-width:2px
+
+    style ASYNC fill:#fff7ed,stroke:#fb923c,stroke-width:2px
+
+    style STORE fill:#f0fdf4,stroke:#4ade80,stroke-width:2px
+
+
+    %% ==================== LINKS ====================
+
+    linkStyle default stroke:#64748b,stroke-width:1.5px
 ```
 
 ## System design decisions
