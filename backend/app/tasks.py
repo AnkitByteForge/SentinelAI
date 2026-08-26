@@ -153,3 +153,22 @@ def touch_api_key_task(key_hash: str):
         _run_async(_touch())
     except Exception as e:
         print(f"[ApiKey] last_used update failed: {e}")
+
+
+# ── Task 5: Deliver a circuit-breaker webhook ─────────────────────────
+@celery_app.task(name="send_webhook", max_retries=3, default_retry_delay=5)
+def send_webhook_task(payload: dict):
+    """
+    Deliver a webhook notification in the background. Used for circuit
+    breaker state-change events so a slow or unreachable webhook endpoint
+    can never add latency to request processing.
+    """
+    async def _send():
+        from app.services.webhook import send_webhook
+
+        await send_webhook(payload)
+
+    try:
+        _run_async(_send())
+    except Exception as e:
+        print(f"[Webhook] task failed: {e}")

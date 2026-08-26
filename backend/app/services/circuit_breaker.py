@@ -62,9 +62,13 @@ class CircuitBreakerRegistry:
 
     def record_success(self, provider: str) -> None:
         """Call this when a provider request succeeds."""
-        circuit = self._get(provider)
+        circuit  = self._get(provider)
+        was_open = circuit.state != CircuitState.CLOSED
         circuit.failure_count = 0
         circuit.state         = CircuitState.CLOSED
+
+        if was_open:
+            self._notify_recovered(provider)
 
     def record_failure(self, provider: str) -> None:
         """
@@ -75,11 +79,49 @@ class CircuitBreakerRegistry:
         circuit.failure_count    += 1
         circuit.last_failure_time = time.monotonic()
 
-        if circuit.failure_count >= circuit.FAILURE_THRESHOLD:
+        if circuit.failure_count >= circuit.FAILURE_THRESHOLD and circuit.state != CircuitState.OPEN:
             circuit.state     = CircuitState.OPEN
             circuit.opened_at = time.monotonic()
             print(f"[CircuitBreaker] ⚡ {provider} circuit OPENED after "
                   f"{circuit.failure_count} failures")
+            self._notify_opened(provider, circuit)
+
+    def _notify_opened(self, provider: str, circuit: "ProviderCircuit") -> None:
+        from datetime import datetime, timezone
+
+        self._fire_webhook({
+            "event":         "circuit_breaker.opened",
+            "provider":      provider,
+            "failure_count": circuit.failure_count,
+            "opened_at":     datetime.now(timezone.utc).isoformat(),
+            "message":       f"{provider} circuit opened after "
+                              f"{circuit.failure_count} consecutive failures",
+        })
+
+    def _notify_recovered(self, provider: str) -> None:
+        from datetime import datetime, timezone
+
+        self._fire_webhook({
+            "event":        "circuit_breaker.recovered",
+            "provider":     provider,
+            "recovered_at": datetime.now(timezone.utc).isoformat(),
+            "message":      f"{provider} circuit closed — provider recovered",
+        })
+
+    def _fire_webhook(self, payload: dict) -> None:
+        """
+        Queue webhook delivery via Celery — never block or raise from here.
+        Lazy imports avoid a module-load-time dependency between the circuit
+        breaker (a low-level, dependency-free service) and Celery/tasks.
+        """
+        try:
+            from app.config import settings
+            if not settings.webhook_url:
+                return
+            from app.tasks import send_webhook_task
+            send_webhook_task.delay(payload)
+        except Exception as e:
+            print(f"[CircuitBreaker] failed to queue webhook: {e}")
 
     def get_state(self, provider: str) -> str:
         """Returns current state string for API responses."""

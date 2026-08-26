@@ -1,14 +1,17 @@
-from fastapi import APIRouter, Depends, Query
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import redis as redis_client
 
+from app.config import settings
 from app.db.database import get_db
 from app.models import LogsResponse, MetricsResponse
 from app.services.queries import get_logs, get_metrics
 from app.routers.gateway import verify_api_key   # reuse the same auth
 from app.services.cache import get_cache_stats
 from app.services.circuit_breaker import registry as cb
+from app.services.webhook import send_webhook
 from app.worker import celery_app
 
 from app.services.cost import get_pricing_table
@@ -107,3 +110,30 @@ async def worker_stats(_: str = Depends(verify_api_key)):
         return {"status": "connected", "queue_depth": queue_depth}
     except Exception:
         return {"status": "down", "queue_depth": 0}
+
+
+@router.get("/v1/webhook/config")
+async def webhook_config(_: str = Depends(verify_api_key)):
+    """Returns whether a circuit-breaker webhook URL and signing secret are configured. Never exposes the secret itself."""
+    return {
+        "url_configured": bool(settings.webhook_url),
+        "secret_configured": bool(settings.webhook_secret),
+    }
+
+
+@router.post("/v1/webhook/test")
+async def webhook_test(_: str = Depends(verify_api_key)):
+    """Fires a test payload at the configured webhook URL synchronously and reports the delivery outcome."""
+    if not settings.webhook_url:
+        raise HTTPException(status_code=400, detail="No webhook_url configured")
+
+    payload = {
+        "event": "webhook.test",
+        "message": "SentinelAI webhook test",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await send_webhook(payload)
+    return {
+        "status": "sent" if result["sent"] else "failed",
+        "response_code": result["status_code"],
+    }
