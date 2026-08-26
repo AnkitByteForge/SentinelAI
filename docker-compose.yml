@@ -1,13 +1,80 @@
+# ═══════════════════════════════════════════════════════════════════════
+# SentinelAI — local development stack
+# ═══════════════════════════════════════════════════════════════════════
+# postgres  PostgreSQL 16 + pgvector — primary datastore and the semantic
+#           cache's vector index (cache_entries.embedding, HNSW).
+# redis     Celery broker (db 0) + result backend (db 1); also backs the
+#           API key lookup cache and per-key rate limiting.
+# backend   FastAPI gateway (uvicorn) — serves /v1/chat and the
+#           observability/key-management endpoints on :8000.
+# worker    Celery worker — writes request logs, stores cache entries,
+#           updates api_keys.last_used, and delivers circuit-breaker
+#           webhooks, all off the request-serving hot path.
+# frontend  Next.js observability dashboard on :3000.
+#
+# Quickest path to a running stack: `python scripts/bootstrap.py` (starts
+# postgres+redis, runs migrations, mints a default key), then
+# `docker-compose up -d` for the rest. See README.md for details.
+# ═══════════════════════════════════════════════════════════════════════
 version: '3.8'
+
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_USER=sentinel
+      - POSTGRES_PASSWORD=sentinel_dev_pass
+      - POSTGRES_DB=sentinelai
+    ports:
+      - "5432:5432"
+    volumes:
+      - sentinel-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinelai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build: ./backend
     ports:
       - "8000:8000"
     env_file: ./backend/.env
-    volumes:
-      - ./backend/sentinelai.db:/app/sentinelai.db
+    environment:
+      # Optional — leave unset to disable circuit-breaker webhook delivery.
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    mem_limit: 512m
+
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker worker --loglevel=info --pool=solo
+    mem_limit: 256m
 
   frontend:
     build: ./frontend
@@ -17,3 +84,6 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+
+volumes:
+  sentinel-postgres-data:

@@ -8,6 +8,10 @@
 /frontend/.env.local
 /frontend/.env.*.local
 
+# Python (scripts/)
+__pycache__/
+*.py[cod]
+
 # General
 .DS_Store
 Thumbs.db
