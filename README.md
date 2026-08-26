@@ -252,77 +252,59 @@ No load test has been run against this deployment yet — the table below is the
 ### Prerequisites
 
 - Docker Desktop
-- A PostgreSQL instance with the `vector` extension available (pgvector), reachable at the URL you set below
-- A Redis instance, reachable at `localhost:6379`
+- Python 3.12 with the backend's dependencies installed (`pip install -r backend/requirements.txt`) — the bootstrap script runs Alembic and mints a key directly, outside any container
 - Free API keys: [Groq](https://console.groq.com) and [Gemini](https://aistudio.google.com/apikey)
 
-`docker-compose.yml` in this repo currently defines only the `backend` and `frontend` services — it does not start Postgres, Redis, or the Celery worker. Run those separately (locally installed, or your own containers) before bringing the stack up.
-
-### 1. Clone and configure
+### 1. Clone and bootstrap
 
 ```bash
 git clone <repo-url>
 cd SentinelAI
-cp backend/.env.example backend/.env
+python scripts/bootstrap.py
 ```
 
-Edit `backend/.env` and set `GROQ_API_KEY`, `GEMINI_API_KEY`, and `POSTGRES_URL` (see the environment variables table below).
+This single command: checks Docker is running, creates `backend/.env` from `.env.example` if it doesn't exist yet, starts Postgres + Redis (`docker-compose up -d postgres redis`), waits for Postgres to report healthy, runs `alembic upgrade head` to create the `api_keys` table, and mints a default API key — printed once.
 
-### 2. Start Postgres and Redis
+After it finishes, open `backend/.env` and set `GROQ_API_KEY` and `GEMINI_API_KEY` (the gateway can't call either provider without them).
 
-If you don't already have them running locally:
+### 2. Start everything
 
 ```bash
-docker run -d --name sentinel-postgres -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel_dev_pass -e POSTGRES_DB=sentinelai -p 5432:5432 pgvector/pgvector:pg16
-docker run -d --name sentinel-redis -p 6379:6379 redis:7-alpine
+docker-compose up -d
 ```
-
-### 3. Start the gateway and dashboard
-
-```bash
-docker-compose up --build
-```
-
-This builds and runs:
 
 | Service | Port | What it runs |
 |---|---|---|
+| `postgres` | `5432` | PostgreSQL 16 + pgvector |
+| `redis` | `6379` | Celery broker/backend, API key cache, rate limiting |
 | `backend` | `8000` | `uvicorn app.main:app` — FastAPI gateway |
+| `worker` | — | `celery -A app.worker worker --pool=solo` — log writes, cache stores, webhook delivery |
 | `frontend` | `3000` | `next start` — dashboard |
 
-`init_db()` creates the `vector` extension and both tables (`requests`, `cache_entries`) automatically on backend startup — no manual migration step is needed for a fresh database.
+`init_db()` still creates the `vector` extension and the legacy `requests`/`cache_entries` tables automatically on backend startup; `api_keys` is Alembic-managed (already applied by the bootstrap script above).
 
-### 4. Build the HNSW index (once, after the tables exist)
+### 3. Build the HNSW index (once, after the tables exist)
 
 ```bash
 cd backend
 python create_hnsw_index.py
 ```
 
-### 5. Start the Celery worker (separate process, not in docker-compose)
-
-```bash
-cd backend
-celery -A app.worker worker --loglevel=info --pool=solo
-```
-
-Without this running, `/v1/chat` still returns responses, but request logs and cache writes never land — `/v1/worker/stats` will report `"status": "down"`.
-
-### 6. Verify
+### 4. Verify
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-```json
-{"status": "ok", "version": "0.1.0", "circuit_breakers": {}}
-```
+Returns HTTP 200 with `"status": "healthy"` once Postgres, Redis, and the providers are all reachable — see [API reference](#api-reference) for the full response shape, and HTTP 503 with `"status": "unhealthy"` if the database or Redis can't be reached.
 
 Then open `http://localhost:3000` for the dashboard, and confirm the worker status badge shows `LIVE`.
 
+To view logs or stop everything: `docker-compose logs -f` / `docker-compose down`.
+
 ## API reference
 
-All endpoints except `/health` require `Authorization: Bearer <API_KEY>` (matched against the `API_KEY` environment variable).
+All endpoints except `/health`, `/health/live`, and `/health/ready` require `Authorization: Bearer <token>`. The token is either the master admin key (`API_KEY` in `.env` — always valid, required for `/v1/keys/*`) or a per-tenant key minted via `POST /v1/keys` (each with its own requests-per-minute limit). See `/docs` for the full OpenAPI reference, including `/v1/keys/*` (key management) and `/v1/webhook/*` (circuit-breaker webhook config/test).
 
 ### `POST /v1/chat`
 
@@ -451,14 +433,28 @@ Returns the static per-1M-token pricing table used for cost calculation.
 
 ### `GET /health`
 
-No auth required.
+No auth required. Runs the database, Redis, Celery, and provider checks concurrently and returns HTTP 503 if the database or Redis is unreachable (`"status": "unhealthy"`) — built for uptime monitors that check status code, not just body. `GET /health/live` is a bare liveness probe (always 200 if the process is up); `GET /health/ready` returns the same payload as `/health` and is meant for a Kubernetes readiness probe.
 
 ```bash
 curl http://localhost:8000/health
 ```
 
 ```json
-{"status": "ok", "version": "0.1.0", "circuit_breakers": {"groq": {"state": "closed", "failure_count": 0, "last_failure": 0.0}}}
+{
+  "status": "healthy",
+  "version": "0.1.0",
+  "timestamp": "2026-08-24T10:23:45.123456+00:00",
+  "checks": {
+    "database": {"status": "healthy", "latency_ms": 4.2, "detail": "postgresql+asyncpg connected, 142 rows in requests"},
+    "redis": {"status": "healthy", "latency_ms": 0.8, "detail": "redis connected, queue_depth: 0"},
+    "celery": {"status": "healthy", "queue_depth": 0, "detail": "worker processing normally"},
+    "providers": {
+      "groq": {"status": "healthy", "circuit_state": "closed", "failure_count": 0},
+      "gemini": {"status": "healthy", "circuit_state": "closed", "failure_count": 0}
+    }
+  },
+  "circuit_breakers": {"groq": {"state": "closed", "failure_count": 0, "last_failure": 0.0}}
+}
 ```
 
 ## Project structure
@@ -466,24 +462,34 @@ curl http://localhost:8000/health
 ```
 SentinelAI/
 ├── backend/
+│   ├── alembic/
+│   │   ├── env.py                   # Async-engine-aware migration runner, reads Settings.postgres_url
+│   │   └── versions/0001_add_api_keys.py  # Creates the api_keys table
+│   ├── alembic.ini
 │   ├── app/
-│   │   ├── main.py                  # FastAPI app: lifespan (init_db, embedding warmup), CORS, /health
+│   │   ├── main.py                  # FastAPI app: lifespan, CORS, routers, /health, /health/live, /health/ready
 │   │   ├── config.py                 # pydantic-settings — reads backend/.env
 │   │   ├── models.py                 # Pydantic request/response schemas (ChatRequest, MetricsResponse, ...)
-│   │   ├── worker.py                  # Celery app instance + broker/backend config
-│   │   ├── tasks.py                  # Celery tasks: log_request, store_cache, post_process
+│   │   ├── worker.py                  # Celery app instance + broker/backend config (from Settings)
+│   │   ├── tasks.py                  # Celery tasks: post_process, touch_api_key, send_webhook
 │   │   ├── db/
-│   │   │   ├── database.py           # Async engine, session factory, init_db() (creates extension + tables)
-│   │   │   └── models.py             # SQLAlchemy models: RequestLog, CacheEntry (with Vector(384) column)
+│   │   │   ├── database.py           # Async engine, session factory, init_db() (extension + legacy tables)
+│   │   │   └── models.py             # SQLAlchemy models: RequestLog, CacheEntry, ApiKey
 │   │   ├── routers/
-│   │   │   ├── gateway.py            # POST /v1/chat — cache check, provider routing, circuit breaker calls
-│   │   │   └── observability.py      # /v1/logs, /v1/metrics, /v1/cache/*, /v1/circuit/*, /v1/worker/stats
+│   │   │   ├── gateway.py            # POST /v1/chat + verify_api_key / verify_master_key auth dependencies
+│   │   │   ├── keys.py               # /v1/keys/* — API key management (master-key auth)
+│   │   │   └── observability.py      # /v1/logs, /v1/metrics, /v1/cache/*, /v1/circuit/*, /v1/webhook/*
 │   │   └── services/
 │   │       ├── providers.py          # Groq + Gemini HTTP clients (shared httpx.AsyncClient)
 │   │       ├── cache.py              # Embedding, hash/vector cache lookup, cache store, cache stats
-│   │       ├── circuit_breaker.py    # CircuitBreakerRegistry — per-provider CLOSED/OPEN/HALF_OPEN state
+│   │       ├── circuit_breaker.py    # CircuitBreakerRegistry — CLOSED/OPEN/HALF_OPEN state + webhook triggers
 │   │       ├── cost.py               # Static pricing table + calculate_cost()
-│   │       └── queries.py            # get_logs() / get_metrics() aggregation queries
+│   │       ├── queries.py            # get_logs() / get_metrics() aggregation queries
+│   │       ├── api_keys.py           # Key generation, hashing, Redis-cached resolution, rotation
+│   │       ├── rate_limiter.py       # Per-key token bucket (Redis, 60s window)
+│   │       ├── webhook.py            # Signed webhook delivery (HMAC-SHA256)
+│   │       ├── health.py             # Concurrent DB/Redis/Celery/provider health checks
+│   │       └── redis_client.py       # Shared async Redis client
 │   ├── tests/
 │   │   └── test_gateway.py           # pytest suite (currently a placeholder)
 │   ├── create_hnsw_index.py           # One-off: creates the HNSW index on cache_entries.embedding
@@ -500,7 +506,10 @@ SentinelAI/
 │   ├── next.config.js                  # Rewrites /api/gateway/* to the backend on :8000
 │   ├── Dockerfile
 │   └── package.json
-├── docker-compose.yml                  # backend (:8000) + frontend (:3000) services
+├── scripts/
+│   └── bootstrap.py                    # One-command setup: infra, migrations, default API key
+├── docker-compose.yml                  # postgres, redis, backend (:8000), worker, frontend (:3000)
+├── CHANGES.md
 └── README.md
 ```
 
@@ -519,14 +528,13 @@ Set in `backend/.env` (see `backend/.env.example`).
 | `PRELOAD_EMBEDDING_MODEL` | No | `false` | If `true`, loads the SentenceTransformer model at process startup instead of on first use |
 | `LOG_STAGE_TIMINGS` | No | `false` | If `true`, prints per-stage timing breakdowns (`cache_check_ms`, `groq_ms`, `gemini_ms`, ...) for each `/v1/chat` call |
 
-Note: the Celery broker/result backend URLs (`redis://localhost:6379/0` and `/1`) and the Redis host used by `/v1/worker/stats` are currently hardcoded in `app/worker.py` and `app/routers/observability.py` rather than sourced from these settings — see production notes below.
+See `backend/.env.example` for the full list, including the API key cache TTL, default per-key rate limit, circuit-breaker webhook config, and health-check timeouts — every one of them now lives in `Settings` (`app/config.py`) rather than being hardcoded in a service file.
 
 ## What production would look like
 
 - **Postgres → managed** (RDS, Neon, or Railway Postgres) with pgvector enabled, instead of a local container
-- **Redis → managed** (ElastiCache or Upstash), and the broker/result-backend URLs in `app/worker.py` moved into `Settings` instead of being hardcoded to `localhost`
+- **Redis → managed** (ElastiCache or Upstash) — already just a `REDIS_URL`/`CELERY_BROKER_URL` change, no code changes needed
 - **Multiple Celery workers** with the `prefork` pool (the current `solo` pool is a Windows-dev workaround, single-threaded by design)
-- **Alembic migrations wired into CI/CD** — `alembic` is already a dependency, but schema changes currently go through `Base.metadata.create_all()` in `init_db()`, which can't handle altering existing tables
-- **A real API key store** (hashed keys in Postgres, one per tenant) instead of a single shared `API_KEY` compared with `==`
-- **Per-org rate limiting** in front of `/v1/chat`, since nothing currently caps request volume per caller
-- **Circuit breaker state in Redis, not in-process memory** — `CircuitBreakerRegistry` is a per-process dict today, so it doesn't share state across multiple backend replicas
+- **Alembic migrations wired into CI/CD** — `api_keys` is now migration-managed (`alembic upgrade head`); the legacy `requests`/`cache_entries` tables still go through `Base.metadata.create_all()` and would need a baseline migration to fully move over
+- **Circuit breaker state in Redis, not in-process memory** — `CircuitBreakerRegistry` is a per-process dict today, so it doesn't share state (or rate-limit windows) across multiple backend replicas
+- **Key rotation reminders / expiry** — `POST /v1/keys/{id}/rotate` exists, but nothing currently prompts a tenant to rotate an old key

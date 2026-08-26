@@ -1,0 +1,25 @@
+# Changes
+
+- **API key management** — added an `api_keys` table (Alembic migration `0001_add_api_keys`), a `services/api_keys.py` service for generation (`sk-sent-<32 hex>`), SHA-256 hashing, Redis-cached (60s) resolution, and rotation, plus `routers/keys.py` (`POST/GET /v1/keys`, `DELETE /v1/keys/{id}`, `POST /v1/keys/{id}/rotate`) gated by a new `verify_master_key` dependency. `verify_api_key` in `routers/gateway.py` now resolves either the master admin key (`API_KEY` in `.env`, kept for backward compatibility) or a per-tenant key.
+- **Per-key rate limiting** — added `services/rate_limiter.py`, a Redis-backed fixed-window token bucket keyed by `ratelimit:{key_hash}:{window_minute}`, wired into `verify_api_key`. Exceeding a key's limit returns HTTP 429 with `X-RateLimit-*`/`Retry-After` headers; successful requests carry `X-RateLimit-Limit`/`X-RateLimit-Remaining`. Redis being unreachable degrades to allowing the request rather than blocking traffic. `GET /v1/keys` reports each key's current-window usage.
+- **Circuit breaker webhook** — added `services/webhook.py` (HMAC-SHA256-signed HTTP POST, 5s timeout, never raises) and two Celery tasks (`send_webhook`, delivery; `touch_api_key`, last-used timestamps) in `app/tasks.py`. `CircuitBreakerRegistry.record_failure`/`record_success` in `services/circuit_breaker.py` now detect the `CLOSED→OPEN` and `→CLOSED` transitions specifically (not every failure) and fire a webhook via Celery. Added `GET /v1/webhook/config` and `POST /v1/webhook/test` to `routers/observability.py`.
+- **Detailed health check** — added `services/health.py`, running database, Redis, Celery queue-depth, and per-provider circuit checks concurrently (`asyncio.gather`) with independent timeouts. Replaced `/health` in `main.py` with a `healthy`/`degraded`/`unhealthy` rollup that returns HTTP 503 when the database or Redis is unreachable, and added `/health/live` (bare liveness) and `/health/ready` (full readiness) for Kubernetes-style probes.
+- **`.env.example` + bootstrap script** — rewrote `backend/.env.example` to document every setting now in `Settings` (Redis/Celery URLs, API key cache TTL, default rate limit, webhook config, health-check timeouts), added `scripts/bootstrap.py` (checks Docker, seeds `.env`, starts Postgres+Redis, waits for Postgres, runs `alembic upgrade head`, mints a default API key), and added `postgres`, `redis`, and `worker` services to `docker-compose.yml` (previously only `backend`/`frontend` were defined) with health checks, memory limits, and optional `WEBHOOK_URL`/`WEBHOOK_SECRET` passthrough.
+
+## Supporting changes
+
+- `app/config.py` — added `redis_url`, `celery_broker_url`, `celery_result_backend`, `api_key_cache_ttl_seconds`, `default_rate_limit_per_minute`, `webhook_url`, `webhook_secret`, `webhook_timeout_seconds`, `health_db_timeout_seconds`, `health_redis_timeout_seconds`, `celery_queue_depth_degraded_threshold`. `app/worker.py`'s Celery broker/backend URLs now come from `Settings` instead of being hardcoded to `localhost`.
+- `app/db/models.py` — added the `ApiKey` model. Unlike `RequestLog`/`CacheEntry`, its schema is Alembic-managed, not created via `Base.metadata.create_all()`.
+- `app/services/redis_client.py` — new shared async Redis client (`redis.asyncio`), closed alongside the HTTP client pool in `main.py`'s lifespan shutdown.
+- Alembic scaffolding added under `backend/alembic/` (`alembic.ini`, `env.py`, `script.py.mako`) — this is the first migration in the repo; `requests`/`cache_entries` remain on the pre-existing `create_all()` path.
+- `README.md` — local setup now leads with `python scripts/bootstrap.py`; fixed several statements that this change made inaccurate (the `docker-compose.yml` service list, the `/health` response shape, the "what production would look like" items for API keys and rate limiting), and updated the project structure tree.
+
+## Verified
+
+- All new/modified backend files byte-compile cleanly (`python -m py_compile`).
+- `python -c "import app.main"` resolves the full router/dependency graph with no circular imports (verified with `sentence_transformers` stubbed out, since the sandbox's cached model is incompatible with the installed `sentence-transformers` version — a pre-existing environment issue unrelated to this change; see note below).
+- `alembic history` and `alembic upgrade head` correctly parse `alembic.ini`/`env.py` and resolve the single `0001_add_api_keys` revision; `upgrade head` fails only at the TCP connection step, since no Postgres instance is running in this sandbox.
+
+## Known gap (pre-existing, not introduced by this change)
+
+`app/services/cache.py` loads `SentenceTransformer("all-MiniLM-L6-v2")` at import time. In this sandbox's `.venv`, that fails with `Pooling.__init__() missing 1 required positional argument: 'embedding_dimension'` — a version mismatch between the installed `sentence-transformers` build and the locally cached model config, unrelated to any of the five features above. Worth checking in an environment with network access or a matching cached model before deploying.
