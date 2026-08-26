@@ -1,14 +1,15 @@
 #FastAPI app entry point
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.routers import gateway
 from app.routers import keys
 from app.routers import observability
-from app.db.database import init_db
-from app.services.circuit_breaker import registry as cb
+from app.db.database import get_db, init_db
+from app.services.health import get_system_health
 from app.config import settings
 
 @asynccontextmanager
@@ -54,10 +55,37 @@ app.include_router(observability.router)
 app.include_router(keys.router)
 
 
+@app.get("/health/live")
+async def health_live():
+    """
+    Kubernetes liveness probe — returns 200 as long as the process is
+    running and able to handle a request. No dependency checks; a slow
+    database or Redis must not cause the orchestrator to kill the pod.
+    """
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def health_ready(response: Response, db: AsyncSession = Depends(get_db)):
+    """
+    Kubernetes readiness probe — full dependency check (database, Redis,
+    Celery, providers). Returns HTTP 503 when the database or Redis is
+    unreachable, so the orchestrator stops routing traffic here.
+    """
+    result = await get_system_health(db)
+    if result["status"] == "unhealthy":
+        response.status_code = 503
+    return result
+
+
 @app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "version": "0.1.0",
-        "circuit_breakers": cb.get_all_states(),   # ← add
-    }
+async def health(response: Response, db: AsyncSession = Depends(get_db)):
+    """
+    Detailed health check for uptime monitors (Better Uptime, UptimeRobot,
+    Datadog). Same rollup as /health/ready — checks status code, not just
+    the body, so an unreachable database/Redis returns HTTP 503.
+    """
+    result = await get_system_health(db)
+    if result["status"] == "unhealthy":
+        response.status_code = 503
+    return result
