@@ -1,7 +1,7 @@
 import uuid
 import time
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatRequest, ChatResponse, UsageInfo, MetaInfo
@@ -9,6 +9,7 @@ from app.services.providers import call_groq, call_gemini
 from app.services.cache import check_cache
 from app.services.circuit_breaker import registry as cb          # ← new
 from app.services.api_keys import resolve_key
+from app.services.rate_limiter import limiter
 from app.db.database import get_db
 from app.config import settings
 
@@ -39,17 +40,19 @@ def _prompt_preview(messages: list[dict]) -> str | None:
 
 
 async def verify_api_key(
+    response: Response,
     authorization: str = Header(...),
     db: AsyncSession = Depends(get_db),
 ) -> str:
     """
-    Resolves the bearer token to a tenant API key or the master admin key.
+    Resolves the bearer token and enforces its rate limit.
 
     Two accepted forms:
-      - The master admin key (settings.api_key) — always valid. Kept for
-        backward compatibility and bootstrapping.
+      - The master admin key (settings.api_key) — always valid, never
+        rate-limited. Kept for backward compatibility and bootstrapping.
       - A per-tenant key (see app/services/api_keys.py) — looked up via a
-        Redis-cached hash lookup against the api_keys table.
+        Redis-cached hash lookup against the api_keys table, then checked
+        against its own requests-per-minute limit.
 
     Returns an identity string ("master" or the key's id) for callers that
     want to know who made the request.
@@ -64,6 +67,22 @@ async def verify_api_key(
     key_data = await resolve_key(db=db, raw_key=token)
     if key_data is None:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+    limit_result = await limiter.check(key_hash=key_data["key_hash"], limit=key_data["rate_limit"])
+    response.headers["X-RateLimit-Limit"] = str(limit_result.limit)
+    response.headers["X-RateLimit-Remaining"] = str(limit_result.remaining)
+
+    if not limit_result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={
+                "X-RateLimit-Limit": str(limit_result.limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(limit_result.reset_seconds),
+                "Retry-After": str(limit_result.reset_seconds),
+            },
+        )
 
     # Fire-and-forget — never block the request on a last_used write.
     touch_api_key_task.delay(key_hash=key_data["key_hash"])
