@@ -8,11 +8,12 @@ from app.models import ChatRequest, ChatResponse, UsageInfo, MetaInfo
 from app.services.providers import call_groq, call_gemini
 from app.services.cache import check_cache
 from app.services.circuit_breaker import registry as cb          # ← new
+from app.services.api_keys import resolve_key
 from app.db.database import get_db
 from app.config import settings
 
-# Import Celery task (fire-and-forget post-processing)
-from app.tasks import post_process_task
+# Import Celery tasks (fire-and-forget post-processing)
+from app.tasks import post_process_task, touch_api_key_task
 
 router = APIRouter()
 
@@ -34,15 +35,52 @@ def _prompt_preview(messages: list[dict]) -> str | None:
     # Fallback: last message content.
     if messages and isinstance(messages[-1].get("content"), str):
         return _truncate(messages[-1].get("content"))
-    return None 
+    return None
 
 
-def verify_api_key(authorization: str = Header(...)):
+async def verify_api_key(
+    authorization: str = Header(...),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """
+    Resolves the bearer token to a tenant API key or the master admin key.
+
+    Two accepted forms:
+      - The master admin key (settings.api_key) — always valid. Kept for
+        backward compatibility and bootstrapping.
+      - A per-tenant key (see app/services/api_keys.py) — looked up via a
+        Redis-cached hash lookup against the api_keys table.
+
+    Returns an identity string ("master" or the key's id) for callers that
+    want to know who made the request.
+    """
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid auth format")
+    token = authorization.replace("Bearer ", "")
+
+    if token == settings.api_key:
+        return "master"
+
+    key_data = await resolve_key(db=db, raw_key=token)
+    if key_data is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Fire-and-forget — never block the request on a last_used write.
+    touch_api_key_task.delay(key_hash=key_data["key_hash"])
+    return key_data["id"]
+
+
+def verify_master_key(authorization: str = Header(...)) -> str:
+    """
+    Admin-only auth for API key management endpoints (routers/keys.py).
+    Accepts only the master key from settings — never a per-tenant key,
+    so a leaked tenant key can't be used to mint or revoke other keys.
+    """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid auth format")
     token = authorization.replace("Bearer ", "")
     if token != settings.api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        raise HTTPException(status_code=401, detail="Admin key required")
     return token
 
 

@@ -5,9 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import asyncio
 from app.routers import gateway
+from app.routers import keys
 from app.routers import observability
 from app.db.database import init_db
-from app.services.circuit_breaker import registry as cb 
+from app.services.circuit_breaker import registry as cb
 from app.config import settings
 
 @asynccontextmanager
@@ -23,8 +24,10 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         from app.services.providers import aclose_http_clients
+        from app.services.redis_client import aclose_redis
 
         await aclose_http_clients()
+        await aclose_redis()
 
 app = FastAPI(
     title="SentinelAI Gateway",
@@ -48,6 +51,7 @@ app.add_middleware(
 
 app.include_router(gateway.router)
 app.include_router(observability.router)
+app.include_router(keys.router)
 
 
 @app.get("/health")

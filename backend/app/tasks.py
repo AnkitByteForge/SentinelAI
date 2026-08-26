@@ -123,3 +123,33 @@ def post_process_task(
                 await store_in_cache(db=db, messages=messages, response=response)
 
     _run_async(_run())
+
+
+# ── Task 4: Update ApiKey.last_used timestamp ─────────────────────────
+@celery_app.task(name="touch_api_key", max_retries=3, default_retry_delay=5)
+def touch_api_key_task(key_hash: str):
+    """
+    Update the last_used timestamp for an API key. Fired from verify_api_key
+    after every successfully authenticated request so the hot path never
+    waits on this write.
+    """
+    async def _touch():
+        from datetime import datetime, timezone
+
+        from sqlalchemy import update as sql_update
+
+        from app.db.database import AsyncSessionLocal
+        from app.db.models import ApiKey
+
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                sql_update(ApiKey)
+                .where(ApiKey.key_hash == key_hash)
+                .values(last_used=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
+    try:
+        _run_async(_touch())
+    except Exception as e:
+        print(f"[ApiKey] last_used update failed: {e}")

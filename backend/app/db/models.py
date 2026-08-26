@@ -44,3 +44,21 @@ class CacheEntry(Base):
     saved_cost_usd= Column(Float,   default=0.0)
     is_stale      = Column(Boolean, default=False)
     created_at    = Column(DateTime, server_default=func.now())
+
+
+class ApiKey(Base):
+    """
+    Per-tenant API key. Raw keys are never stored — only a SHA-256 hash.
+    Schema is managed by Alembic (see alembic/versions/0001_add_api_keys.py),
+    not by Base.metadata.create_all(), unlike the two tables above.
+    """
+    __tablename__ = "api_keys"
+
+    id          = Column(String,   primary_key=True, default=lambda: str(uuid.uuid4()))
+    key_hash    = Column(String,   nullable=False, unique=True, index=True)
+    key_prefix  = Column(String,   nullable=False)
+    name        = Column(String,   nullable=False)
+    is_active   = Column(Boolean,  nullable=False, default=True)
+    rate_limit  = Column(Integer,  nullable=False, default=100)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    last_used   = Column(DateTime(timezone=True), nullable=True)
