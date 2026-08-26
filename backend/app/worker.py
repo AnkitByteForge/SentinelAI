@@ -10,8 +10,8 @@ from app.config import settings
 
 celery_app = Celery(
     "sentinelai",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
+    broker=settings.celery_broker_url,
+    backend=settings.celery_result_backend,
     include=["app.tasks"],          # where to find task definitions
 )
 
