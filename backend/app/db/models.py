@@ -1,6 +1,7 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text, func
+
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, func
 
 from app.db.database import Base
 

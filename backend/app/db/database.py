@@ -1,5 +1,6 @@
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
 from app.config import settings
 
 # ── Engine ────────────────────────────────────────────────────────────
@@ -28,14 +29,16 @@ async def get_db():
         yield session
 
 async def init_db():
-    """Create all tables. Will be replaced by Alembic in Step 3."""
+    """
+    Ensures the pgvector extension exists (idempotent, needed before any
+    migration touching a vector column can run) and nothing else.
+
+    Schema is entirely Alembic-managed as of migrations 0001/0002 — run
+    `alembic upgrade head` to create/update tables. This function used to
+    also call Base.metadata.create_all(), which can create tables but
+    can't alter existing ones, making it unsafe as a schema-management
+    strategy once the schema needs to change.
+    """
     async with engine.begin() as conn:
-        # Enable pgvector extension first — idempotent
         from sqlalchemy import text
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.commit()
-
-    # Create tables
-    async with engine.begin() as conn:
-        from app.db.models import RequestLog, CacheEntry
-        await conn.run_sync(Base.metadata.create_all)
