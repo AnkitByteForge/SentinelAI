@@ -209,7 +209,7 @@ flowchart TD
 
 **Postgres over SQLite** — `config.py` still carries a `database_url` SQLite fallback from an earlier iteration, but the live engine (`db/database.py`) is wired to `postgres_url`. Celery workers write to the database from a separate process than the API server; SQLite's single-writer lock model doesn't hold up once writes are concurrent and out-of-process. Postgres's MVCC gives every worker and every request its own transaction without blocking the others.
 
-**pgvector HNSW over a Python-side cosine scan** — The naive approach — pull every cached embedding into Python and compute cosine similarity in a loop — is O(n) per lookup and gets slower as the cache grows, which is exactly backwards for a cache. `create_hnsw_index.py` builds an HNSW index (`m=16, ef_construction=64`) on `cache_entries.embedding`, so the `ORDER BY embedding <=> :vec LIMIT 1` query in `check_cache()` resolves in Postgres via approximate nearest-neighbor search — O(log n) — instead of a full table scan.
+**pgvector HNSW over a Python-side cosine scan** — The naive approach — pull every cached embedding into Python and compute cosine similarity in a loop — is O(n) per lookup and gets slower as the cache grows, which is exactly backwards for a cache. Migration `0002_requests_cache` builds an HNSW index (`m=16, ef_construction=64`) on `cache_entries.embedding`, so the `ORDER BY embedding <=> :vec LIMIT 1` query in `check_cache()` resolves in Postgres via approximate nearest-neighbor search — O(log n) — instead of a full table scan.
 
 **Celery async over synchronous DB writes** — `/v1/chat` returns as soon as it has a response; the DB write and cache-store happen after, via `post_process_task.delay(...)` over Redis. If those writes were awaited inline, every request's latency would include Postgres round-trip time and, for cache misses, an embedding computation — both irrelevant to what the caller is waiting for.
 
@@ -218,6 +218,8 @@ flowchart TD
 **Semantic cache over exact-match cache** — An exact-match cache (hash the prompt, look it up) only catches identical strings. "What's your refund policy?" and "can you explain the refund policy" are different strings with the same answer. Embedding the prompt and comparing by cosine similarity catches paraphrases; the exact-hash check stays as a fast-path O(1) short-circuit for genuinely identical repeats before falling through to the vector search.
 
 **0.92 cosine similarity threshold** — Set in `services/cache.py` as `SIMILARITY_THRESHOLD`. Below ~0.90, unrelated-but-topically-adjacent prompts ("summarize this contract" vs. "review this contract") start collapsing onto the same cache entry, returning a wrong answer with high confidence. 0.92 was chosen to bias toward precision — a false cache-hit is a silently wrong answer served to a user, which is a worse failure mode than an avoidable cache miss that just costs one extra provider call.
+
+**Circuit breaker state in Redis, not in-process memory** — An in-process dict only produces correct circuit state for one replica; with more than one backend instance, each would independently decide whether a provider is healthy, defeating the point of a *shared* circuit. State is now a Redis hash per provider (`circuit:{provider}`), with the failure counter incremented via `HINCRBY` (atomic — correct under concurrent requests across replicas, unlike a read-increment-write) and a short-lived `SET NX` lock around the `OPEN` transition so concurrent replicas don't all fire duplicate webhook notifications. Falls back to a local in-memory copy if Redis is unreachable, so a Redis outage degrades circuit accuracy but never blocks provider calls — the added latency is negligible either way, since these checks only run on cache misses, which already cost 1.5-2.5s for the LLM call itself.
 
 ## Benchmark results
 
@@ -263,7 +265,7 @@ cd SentinelAI
 python scripts/bootstrap.py
 ```
 
-This single command: checks Docker is running, creates `backend/.env` from `.env.example` if it doesn't exist yet, starts Postgres + Redis (`docker-compose up -d postgres redis`), waits for Postgres to report healthy, runs `alembic upgrade head` to create the `api_keys` table, and mints a default API key — printed once.
+This single command: checks Docker is running, creates `backend/.env` from `.env.example` if it doesn't exist yet, starts Postgres + Redis (`docker-compose up -d postgres redis`), waits for Postgres to report healthy, runs `alembic upgrade head` (creates `api_keys`, `requests`, `cache_entries`, and the cache's HNSW index — the full schema, in one step), and mints a default API key — printed once.
 
 After it finishes, open `backend/.env` and set `GROQ_API_KEY` and `GEMINI_API_KEY` (the gateway can't call either provider without them).
 
@@ -281,16 +283,9 @@ docker-compose up -d
 | `worker` | — | `celery -A app.worker worker --pool=solo` — log writes, cache stores, webhook delivery |
 | `frontend` | `3000` | `next start` — dashboard |
 
-`init_db()` still creates the `vector` extension and the legacy `requests`/`cache_entries` tables automatically on backend startup; `api_keys` is Alembic-managed (already applied by the bootstrap script above).
+Schema is entirely Alembic-managed (`api_keys`, `requests`, `cache_entries`, plus the cache's HNSW index) — `init_db()` on backend startup only ensures the `vector` extension exists, as a safety net.
 
-### 3. Build the HNSW index (once, after the tables exist)
-
-```bash
-cd backend
-python create_hnsw_index.py
-```
-
-### 4. Verify
+### 3. Verify
 
 ```bash
 curl http://localhost:8000/health
@@ -301,6 +296,54 @@ Returns HTTP 200 with `"status": "healthy"` once Postgres, Redis, and the provid
 Then open `http://localhost:3000` for the dashboard, and confirm the worker status badge shows `LIVE`.
 
 To view logs or stop everything: `docker-compose logs -f` / `docker-compose down`.
+
+### The dashboard never sees an API key
+
+`frontend/app/page.tsx` calls same-origin `/api/gateway/*`, which `frontend/app/api/gateway/[...path]/route.ts` (a Next.js server-side route handler, not a `next.config.js` rewrite — a rewrite can't add headers) proxies to the backend, injecting `Authorization: Bearer $SENTINEL_API_KEY` there. The browser never receives that header, so it never shows up in DevTools' network tab or the client JS bundle. Configure it in `frontend/.env.local` (see `frontend/.env.example`) — use a low-rate-limit tenant key minted via `POST /v1/keys`, not the master key, since the dashboard only ever needs read access to metrics/logs.
+
+## Testing
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest
+```
+
+`tests/conftest.py` spins up a real Postgres+pgvector container via `testcontainers` (needs Docker) and runs `alembic upgrade head` against it before any test runs, so integration tests exercise the real schema — not a mock. Redis is faked (`fakeredis`), and Groq/Gemini calls are monkeypatched (`conftest.mock_providers`) so the suite has no external dependencies or cost.
+
+- `tests/unit/` — circuit breaker state transitions (and that webhooks fire only on `CLOSED→OPEN`/`→CLOSED`, not every failure), rate limiter windowing and Redis-down degradation, API key hashing/rotation/cache invalidation, cost calculation, webhook HMAC signing, health check status rollup rules.
+- `tests/integration/` — `/v1/chat` (cache hit/miss, provider fallback, all-down, auth, rate limiting), `/v1/keys` CRUD + rotation, `/v1/circuit/*`, `/health*`, `/v1/webhook/*` — all through the real HTTP layer via `httpx.ASGITransport`.
+
+`ruff check .` lints the same way CI does. Both run automatically in `.github/workflows/ci.yml` on every push/PR — the CI job needs no external services either, for the same reason (testcontainers + fakeredis).
+
+## Load testing
+
+The README's benchmark table below reflects real runs of this suite. Three scenarios, each answering a different question:
+
+**1. Realistic mix, real providers** — validates the cache/cost value proposition with real latency numbers. Kept to low concurrency to stay under Groq/Gemini's free-tier rate limits.
+
+```bash
+cd backend
+locust -f tests/locustfile.py RealisticMixUser --host http://localhost:8000 -u 15 -r 5 -t 3m --headless \
+  --csv=loadtest-realistic
+```
+
+**2. Infra stress test, mock providers** — finds the gateway's own ceiling (DB pool, Redis connections), not Groq's. Requires the mock-provider override:
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build
+locust -f tests/locustfile.py InfraStressUser --host http://localhost:8000 -u 200 -r 20 -t 3m --headless \
+  --csv=loadtest-infra
+```
+
+**3. Automated failover** — forces the mock Groq into 100% failure mid-run and asserts zero failed requests (Gemini serves everything) plus a confirmed circuit-breaker transition. Requires the same `docker-compose.loadtest.yml` stack as above:
+
+```bash
+python scripts/loadtest_failover.py --host http://localhost:8000 --mock-host http://localhost:9000 \
+  --api-key <your master API_KEY>
+```
+
+For a quick single-number check (cache hit rate, p95, cost saved) without installing Locust, `tests/load_test.py` is a smaller standalone script — see its docstring.
 
 ## API reference
 
@@ -463,52 +506,65 @@ curl http://localhost:8000/health
 SentinelAI/
 ├── backend/
 │   ├── alembic/
-│   │   ├── env.py                   # Async-engine-aware migration runner, reads Settings.postgres_url
-│   │   └── versions/0001_add_api_keys.py  # Creates the api_keys table
+│   │   ├── env.py                    # Async-engine-aware migration runner, reads Settings.postgres_url
+│   │   └── versions/                 # 0001_api_keys, 0002_requests_cache (+ HNSW index) — full schema
 │   ├── alembic.ini
 │   ├── app/
-│   │   ├── main.py                  # FastAPI app: lifespan, CORS, routers, /health, /health/live, /health/ready
-│   │   ├── config.py                 # pydantic-settings — reads backend/.env
-│   │   ├── models.py                 # Pydantic request/response schemas (ChatRequest, MetricsResponse, ...)
-│   │   ├── worker.py                  # Celery app instance + broker/backend config (from Settings)
-│   │   ├── tasks.py                  # Celery tasks: post_process, touch_api_key, send_webhook
+│   │   ├── main.py                   # FastAPI app: lifespan, CORS, routers, /health, /health/live, /health/ready
+│   │   ├── config.py                  # pydantic-settings — reads backend/.env
+│   │   ├── logging_config.py         # JSON structured logging setup (stdlib logging, no print())
+│   │   ├── models.py                  # Pydantic request/response schemas (ChatRequest, MetricsResponse, ...)
+│   │   ├── worker.py                   # Celery app instance + broker/backend config (from Settings)
+│   │   ├── tasks.py                   # Celery tasks: post_process, touch_api_key, send_webhook
 │   │   ├── db/
-│   │   │   ├── database.py           # Async engine, session factory, init_db() (extension + legacy tables)
-│   │   │   └── models.py             # SQLAlchemy models: RequestLog, CacheEntry, ApiKey
+│   │   │   ├── database.py            # Async engine, session factory, init_db() (extension only — Alembic owns schema)
+│   │   │   └── models.py              # SQLAlchemy models: RequestLog, CacheEntry, ApiKey
 │   │   ├── routers/
-│   │   │   ├── gateway.py            # POST /v1/chat + verify_api_key / verify_master_key auth dependencies
-│   │   │   ├── keys.py               # /v1/keys/* — API key management (master-key auth)
-│   │   │   └── observability.py      # /v1/logs, /v1/metrics, /v1/cache/*, /v1/circuit/*, /v1/webhook/*
+│   │   │   ├── gateway.py             # POST /v1/chat + verify_api_key / verify_master_key auth dependencies
+│   │   │   ├── keys.py                # /v1/keys/* — API key management (master-key auth)
+│   │   │   └── observability.py       # /v1/logs, /v1/metrics, /v1/cache/*, /v1/circuit/*, /v1/webhook/*
 │   │   └── services/
-│   │       ├── providers.py          # Groq + Gemini HTTP clients (shared httpx.AsyncClient)
-│   │       ├── cache.py              # Embedding, hash/vector cache lookup, cache store, cache stats
-│   │       ├── circuit_breaker.py    # CircuitBreakerRegistry — CLOSED/OPEN/HALF_OPEN state + webhook triggers
-│   │       ├── cost.py               # Static pricing table + calculate_cost()
-│   │       ├── queries.py            # get_logs() / get_metrics() aggregation queries
-│   │       ├── api_keys.py           # Key generation, hashing, Redis-cached resolution, rotation
-│   │       ├── rate_limiter.py       # Per-key token bucket (Redis, 60s window)
-│   │       ├── webhook.py            # Signed webhook delivery (HMAC-SHA256)
-│   │       ├── health.py             # Concurrent DB/Redis/Celery/provider health checks
-│   │       └── redis_client.py       # Shared async Redis client
+│   │       ├── providers.py           # Groq + Gemini HTTP clients (shared httpx.AsyncClient)
+│   │       ├── cache.py               # Embedding (lazy-loaded), hash/vector cache lookup, cache store, stats
+│   │       ├── circuit_breaker.py     # Redis-backed CLOSED/OPEN/HALF_OPEN state + webhook triggers
+│   │       ├── cost.py                # Static pricing table + calculate_cost()
+│   │       ├── queries.py             # get_logs() / get_metrics() aggregation queries
+│   │       ├── api_keys.py            # Key generation, hashing, Redis-cached resolution, rotation
+│   │       ├── rate_limiter.py        # Per-key token bucket (Redis, 60s window)
+│   │       ├── webhook.py             # Signed webhook delivery (HMAC-SHA256)
+│   │       ├── health.py              # Concurrent DB/Redis/Celery/provider health checks
+│   │       └── redis_client.py        # Shared async Redis client
 │   ├── tests/
-│   │   └── test_gateway.py           # pytest suite (currently a placeholder)
-│   ├── create_hnsw_index.py           # One-off: creates the HNSW index on cache_entries.embedding
-│   ├── test_pg_connection.py          # Manual script: verifies Postgres + pgvector connectivity
-│   ├── test_pgvector_insert.py        # Manual script: verifies vector insert/search round-trip
+│   │   ├── conftest.py                # testcontainers Postgres + fakeredis + mocked providers
+│   │   ├── unit/                      # circuit breaker, rate limiter, api keys, cost, webhook, health
+│   │   ├── integration/                # /v1/chat, /v1/keys, /health*, /v1/circuit/*, /v1/webhook/* via HTTP
+│   │   ├── mock_provider.py            # Stand-in Groq/Gemini for load testing (latency/failure injection)
+│   │   ├── locustfile.py               # RealisticMixUser, InfraStressUser load-test scenarios
+│   │   └── load_test.py                # Standalone single-run benchmark script (no Locust needed)
+│   ├── test_pg_connection.py           # Manual script: verifies Postgres + pgvector connectivity
+│   ├── test_pgvector_insert.py         # Manual script: verifies vector insert/search round-trip
 │   ├── requirements.txt
-│   ├── Dockerfile
+│   ├── requirements-dev.txt            # pytest, fakeredis, testcontainers, locust, ruff
+│   ├── pyproject.toml                  # pytest + ruff config
+│   ├── Dockerfile                      # Multi-stage, non-root
+│   ├── .dockerignore
 │   └── .env.example
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx                   # Dashboard — metrics, logs, cache, circuit breakers, pipeline trace
-│   │   └── layout.tsx
-│   ├── lib/api.ts                     # Typed fetch wrappers for the gateway API
-│   ├── next.config.js                  # Rewrites /api/gateway/* to the backend on :8000
-│   ├── Dockerfile
+│   │   ├── page.tsx                    # Dashboard — metrics, logs, cache, circuit breakers, pipeline trace
+│   │   ├── layout.tsx
+│   │   └── api/gateway/[...path]/route.ts  # Server-side proxy — injects the API key, browser never sees it
+│   ├── next.config.js                   # No rewrites — the route handler above replaces that
+│   ├── Dockerfile                       # Multi-stage, non-root
+│   ├── .dockerignore
+│   ├── .env.example
 │   └── package.json
 ├── scripts/
-│   └── bootstrap.py                    # One-command setup: infra, migrations, default API key
-├── docker-compose.yml                  # postgres, redis, backend (:8000), worker, frontend (:3000)
+│   ├── bootstrap.py                     # One-command setup: infra, migrations, default API key
+│   └── loadtest_failover.py             # Automated circuit-breaker failover scenario
+├── .github/workflows/ci.yml              # Lint + test on every push/PR (testcontainers, no services: needed)
+├── docker-compose.yml                    # postgres, redis, backend (:8000), worker, frontend (:3000)
+├── docker-compose.loadtest.yml           # Override: swaps in tests/mock_provider.py for load testing
 ├── CHANGES.md
 └── README.md
 ```
@@ -523,10 +579,13 @@ Set in `backend/.env` (see `backend/.env.example`).
 | `GEMINI_API_KEY` | Yes | `""` | API key for the fallback provider (Gemini) |
 | `POSTGRES_URL` | Yes | `postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai` | Async SQLAlchemy connection string; this is what the engine actually uses |
 | `DATABASE_URL` | No | `sqlite+aiosqlite:///./sentinelai.db` | Legacy SQLite URL from an earlier iteration; not used by the active engine |
-| `API_KEY` | Yes | `sentinel-dev-key-123` | Shared bearer token every request to `/v1/*` must present |
+| `API_KEY` | Yes | `sentinel-dev-key-123` | Master admin key — always valid, required for `/v1/keys/*`; per-tenant keys are the normal `/v1/chat` auth path |
 | `ENVIRONMENT` | No | `development` | Informational — not currently branched on in code |
+| `CORS_ALLOWED_ORIGINS` | No | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated browser origins allowed to call the API |
+| `GROQ_BASE_URL` / `GEMINI_BASE_URL` | No | real provider endpoints | Override to point at `tests/mock_provider.py` for load testing |
+| `LOG_LEVEL` | No | `INFO` | Standard Python logging level; all logs are JSON lines to stdout |
 | `PRELOAD_EMBEDDING_MODEL` | No | `false` | If `true`, loads the SentenceTransformer model at process startup instead of on first use |
-| `LOG_STAGE_TIMINGS` | No | `false` | If `true`, prints per-stage timing breakdowns (`cache_check_ms`, `groq_ms`, `gemini_ms`, ...) for each `/v1/chat` call |
+| `LOG_STAGE_TIMINGS` | No | `false` | If `true`, logs per-stage timing breakdowns (`cache_check_ms`, `groq_ms`, `gemini_ms`, ...) for each `/v1/chat` call |
 
 See `backend/.env.example` for the full list, including the API key cache TTL, default per-key rate limit, circuit-breaker webhook config, and health-check timeouts — every one of them now lives in `Settings` (`app/config.py`) rather than being hardcoded in a service file.
 
@@ -535,6 +594,9 @@ See `backend/.env.example` for the full list, including the API key cache TTL, d
 - **Postgres → managed** (RDS, Neon, or Railway Postgres) with pgvector enabled, instead of a local container
 - **Redis → managed** (ElastiCache or Upstash) — already just a `REDIS_URL`/`CELERY_BROKER_URL` change, no code changes needed
 - **Multiple Celery workers** with the `prefork` pool (the current `solo` pool is a Windows-dev workaround, single-threaded by design)
-- **Alembic migrations wired into CI/CD** — `api_keys` is now migration-managed (`alembic upgrade head`); the legacy `requests`/`cache_entries` tables still go through `Base.metadata.create_all()` and would need a baseline migration to fully move over
-- **Circuit breaker state in Redis, not in-process memory** — `CircuitBreakerRegistry` is a per-process dict today, so it doesn't share state (or rate-limit windows) across multiple backend replicas
 - **Key rotation reminders / expiry** — `POST /v1/keys/{id}/rotate` exists, but nothing currently prompts a tenant to rotate an old key
+- **CI auto-deploy** — `.github/workflows/ci.yml` runs lint, tests, and an image build check on every push; it doesn't push images or deploy anywhere yet, since no deploy target exists
+
+### Already done, not hypothetical
+
+Two items that used to live in this section are actually shipped now: circuit breaker state is Redis-backed (`services/circuit_breaker.py`) with a same-process in-memory fallback if Redis is down, so it's correct across multiple backend replicas; and the full schema (`api_keys`, `requests`, `cache_entries`, the HNSW index) is Alembic-managed — `alembic upgrade head` is the only way the schema gets created or changed, `Base.metadata.create_all()` is gone entirely.
