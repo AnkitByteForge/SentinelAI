@@ -1,0 +1,26 @@
+# Never let a locally-built image bake in secrets or bloat — .env holds
+# real API keys, venv/__pycache__ are huge and platform-specific, and
+# tests/dev tooling have no place in the runtime image.
+.env
+.env.*
+!.env.example
+
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# tests/ is intentionally NOT excluded — docker-compose.loadtest.yml's
+# mock-provider service runs tests/mock_provider.py from this same image.
+# Only its cache/artifacts are excluded above (.pytest_cache/, __pycache__/).
+requirements-dev.txt
+pyproject.toml
+
+*.db
+*.sqlite3
+
+.git/
+.gitignore

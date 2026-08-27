@@ -3,6 +3,7 @@
 /frontend/.next/
 /frontend/out/
 /frontend/.turbo/
+/frontend/tsconfig.tsbuildinfo
 
 # Local env files (do not commit secrets)
 /frontend/.env.local
