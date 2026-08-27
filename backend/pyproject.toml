@@ -1,0 +1,21 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: requires Docker (testcontainers Postgres+pgvector)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["alembic/versions", "venv", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E402",  # a few modules intentionally configure logging before other app imports
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]  # fixtures imported for their side effects

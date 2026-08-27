@@ -5,10 +5,11 @@ Directly tests that we can:
 This bypasses Celery entirely to isolate the issue.
 """
 import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text, select
 import uuid
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 POSTGRES_URL = "postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai"
 

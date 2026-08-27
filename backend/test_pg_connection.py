@@ -1,6 +1,7 @@
 import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine
+
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 POSTGRES_URL = "postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai"
 
