@@ -1,8 +1,10 @@
 # Groq + Gemini clients
 
-import httpx
-import time
 import asyncio
+import time
+
+import httpx
+
 from app.config import settings
 from app.services.cost import calculate_cost
 
@@ -31,7 +33,8 @@ async def aclose_http_clients() -> None:
         _client = None
 
 # ─── Groq (OpenAI-compatible, free tier) ───────────────────────────
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Base URL is overridable (GROQ_BASE_URL) so load tests can point at a
+# local mock instead of the real API — see backend/tests/mock_provider.py.
 
 async def call_groq(messages: list[dict], model: str, max_tokens: int, temperature: float) -> dict:
     """Call Groq API. Returns normalized response dict."""
@@ -41,7 +44,7 @@ async def call_groq(messages: list[dict], model: str, max_tokens: int, temperatu
 
     client = await _get_client()
     resp = await client.post(
-        f"{GROQ_BASE_URL}/chat/completions",
+        f"{settings.groq_base_url}/chat/completions",
         headers={
             "Authorization": f"Bearer {settings.groq_api_key}",
             "Content-Type": "application/json",
@@ -75,7 +78,7 @@ async def call_groq(messages: list[dict], model: str, max_tokens: int, temperatu
 
 
 # ─── Gemini (free tier via REST) ───────────────────────────────────
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+# Base URL is overridable (GEMINI_BASE_URL) for the same reason as Groq above.
 
 def _convert_to_gemini_format(messages: list[dict]) -> tuple[str, list[dict]]:
     """Convert OpenAI message format to Gemini format."""
@@ -112,7 +115,7 @@ async def call_gemini(messages: list[dict], max_tokens: int, temperature: float)
 
     client = await _get_client()
     resp = await client.post(
-        f"{GEMINI_BASE_URL}/models/{model}:generateContent",
+        f"{settings.gemini_base_url}/models/{model}:generateContent",
         params={"key": settings.gemini_api_key},
         json=payload,
     )

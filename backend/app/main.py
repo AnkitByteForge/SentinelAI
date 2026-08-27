@@ -1,16 +1,23 @@
 #FastAPI app entry point
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.routers import gateway
-from app.routers import keys
-from app.routers import observability
-from app.db.database import get_db, init_db
-from app.services.health import get_system_health
+
 from app.config import settings
+from app.logging_config import configure_logging
+
+configure_logging(settings.log_level)   # before other app imports, so their loggers inherit it
+
+from app.db.database import get_db, init_db
+from app.routers import gateway, keys, observability
+from app.services.health import get_system_health
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,14 +44,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow the Next.js dev server to call the API from the browser.
+# Origins allowed to call the API from a browser — set via CORS_ALLOWED_ORIGINS.
 # (Browser requests include a CORS preflight when using Authorization headers.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=settings.cors_allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

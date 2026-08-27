@@ -7,8 +7,11 @@ import {
 } from 'recharts'
 
 // ── Constants ─────────────────────────────────────────────────────────
-const BASE    = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
-const HEADERS = { 'Authorization': 'Bearer sentinel-dev-key-123', 'Content-Type': 'application/json' }
+// Always same-origin: app/api/gateway/[...path]/route.ts proxies to the
+// backend server-side and injects the API key there. The browser never
+// sees a key, and never needs a backend URL — it's whatever origin
+// served this page.
+const BASE = '/api/gateway'
 
 const C = {
   cyan:    '#00E5CC',
@@ -127,7 +130,7 @@ function safeDiv(a: number, b: number): number {
 // ── API calls ─────────────────────────────────────────────────────────
 async function getMetrics(win: string): Promise<Metrics | null> {
   try {
-    const r = await fetch(`${BASE}/v1/metrics?window=${win}`, { headers: HEADERS })
+    const r = await fetch(`${BASE}/v1/metrics?window=${win}`)
     if (!r.ok) return null
     return r.json()
   } catch { return null }
@@ -135,7 +138,7 @@ async function getMetrics(win: string): Promise<Metrics | null> {
 
 async function getLogs(limit = 100): Promise<LogEntry[]> {
   try {
-    const r = await fetch(`${BASE}/v1/logs?limit=${limit}`, { headers: HEADERS })
+    const r = await fetch(`${BASE}/v1/logs?limit=${limit}`)
     if (!r.ok) return []
     const d = await r.json()
     return d.logs || []
@@ -144,7 +147,7 @@ async function getLogs(limit = 100): Promise<LogEntry[]> {
 
 async function getCacheStats(): Promise<CacheStats | null> {
   try {
-    const r = await fetch(`${BASE}/v1/cache/stats`, { headers: HEADERS })
+    const r = await fetch(`${BASE}/v1/cache/stats`)
     if (!r.ok) return null
     return r.json()
   } catch { return null }
@@ -152,7 +155,7 @@ async function getCacheStats(): Promise<CacheStats | null> {
 
 async function getCircuits(): Promise<Record<string, CircuitState>> {
   try {
-    const r = await fetch(`${BASE}/v1/circuit/states`, { headers: HEADERS })
+    const r = await fetch(`${BASE}/v1/circuit/states`)
     if (!r.ok) return {}
     return r.json()
   } catch { return {} }
@@ -160,7 +163,7 @@ async function getCircuits(): Promise<Record<string, CircuitState>> {
 
 async function getWorkerStats(): Promise<WorkerStats | null> {
   try {
-    const r = await fetch(`${BASE}/v1/worker/stats`, { headers: HEADERS })
+    const r = await fetch(`${BASE}/v1/worker/stats`)
     if (!r.ok) return null
     return r.json()
   } catch { return null }
