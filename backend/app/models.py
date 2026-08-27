@@ -1,7 +1,9 @@
 # Pydantic request/response model
-from pydantic import BaseModel
-from typing import Optional, List
 from datetime import datetime
+from typing import List, Optional
+
+from pydantic import BaseModel, ConfigDict
+
 
 class Message(BaseModel):
     role: str       # "system" | "user" | "assistant"
@@ -51,8 +53,7 @@ class LogEntry(BaseModel):
     response_preview: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True   # allows building from SQLAlchemy ORM objects
+    model_config = ConfigDict(from_attributes=True)   # allows building from SQLAlchemy ORM objects
 
 class LogsResponse(BaseModel):
     total: int
