@@ -1,21 +1,24 @@
-import uuid
+import logging
 import time
+import uuid
+
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Header, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ChatRequest, ChatResponse, UsageInfo, MetaInfo
-from app.services.providers import call_groq, call_gemini
-from app.services.cache import check_cache
-from app.services.circuit_breaker import registry as cb          # ← new
-from app.services.api_keys import resolve_key
-from app.services.rate_limiter import limiter
-from app.db.database import get_db
 from app.config import settings
+from app.db.database import get_db
+from app.models import ChatRequest, ChatResponse, MetaInfo, UsageInfo
+from app.services.api_keys import resolve_key
+from app.services.cache import check_cache
+from app.services.circuit_breaker import registry as cb  # ← new
+from app.services.providers import call_gemini, call_groq
+from app.services.rate_limiter import limiter
 
 # Import Celery tasks (fire-and-forget post-processing)
 from app.tasks import post_process_task, touch_api_key_task
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -108,29 +111,29 @@ async def _try_provider(name: str, fn) -> dict | None:
     Attempt a provider call with circuit breaker protection.
     Returns result dict on success, None on any failure.
     """
-    if not cb.is_available(name):
-        print(f"[CircuitBreaker] {name} is OPEN — skipping immediately")
+    if not await cb.is_available(name):
+        logger.info("%s circuit is OPEN — skipping immediately", name)
         return None
 
     try:
         result = await fn()
-        cb.record_success(name)
+        await cb.record_success(name)
         return result
 
     except httpx.TimeoutException:
-        print(f"[CircuitBreaker] {name} TIMEOUT — recording failure")
-        cb.record_failure(name)
+        logger.warning("%s TIMEOUT — recording circuit breaker failure", name)
+        await cb.record_failure(name)
         return None
 
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
-        print(f"[CircuitBreaker] {name} returned HTTP {status_code} — recording failure")
-        cb.record_failure(name)   # ← record ALL HTTP errors now, not just some
-        return None               # ← always return None, never re-raise
+        logger.warning("%s returned HTTP %d — recording circuit breaker failure", name, status_code)
+        await cb.record_failure(name)   # ← record ALL HTTP errors now, not just some
+        return None                     # ← always return None, never re-raise
 
     except Exception as e:
-        print(f"[CircuitBreaker] {name} unexpected error: {e}")
-        cb.record_failure(name)
+        logger.error("%s unexpected error: %s", name, e)
+        await cb.record_failure(name)
         return None
 
 
@@ -178,15 +181,16 @@ async def chat(
                 response_preview=_truncate(cached.get("content")),
             )
             task_queue_ms = int((time.monotonic() - task_start) * 1000)
-            print(f"[Async] Task queued in {task_queue_ms}ms")
+            logger.debug("task queued", extra={"request_id": request_id, "task_queue_ms": task_queue_ms})
 
             if settings.log_stage_timings:
                 total_ms = int((time.monotonic() - wall_start) * 1000)
-                print(
-                    "[Timing] "
-                    f"id={request_id} cache_hit=true total_ms={total_ms} "
-                    f"cache_check_ms={stage.get('cache_check_ms')} "
-                    f"task_queue_ms={task_queue_ms}"
+                logger.info(
+                    "chat request timing",
+                    extra={
+                        "request_id": request_id, "cache_hit": True, "total_ms": total_ms,
+                        "cache_check_ms": stage.get("cache_check_ms"), "task_queue_ms": task_queue_ms,
+                    },
                 )
 
             return ChatResponse(
@@ -252,21 +256,24 @@ async def chat(
             response_preview=None,
         )
         task_queue_ms = int((time.monotonic() - task_start) * 1000)
-        print(f"[Async] Task queued in {task_queue_ms}ms")
+        logger.debug("task queued", extra={"request_id": request_id, "task_queue_ms": task_queue_ms})
 
         if settings.log_stage_timings:
             total_ms = int((time.monotonic() - wall_start) * 1000)
-            print(
-                "[Timing] "
-                f"id={request_id} cache_hit=false status=error total_ms={total_ms} "
-                f"cache_check_ms={stage.get('cache_check_ms')} groq_ms={stage.get('groq_ms')} "
-                f"gemini_ms={stage.get('gemini_ms')} task_queue_ms={task_queue_ms}"
+            logger.info(
+                "chat request timing",
+                extra={
+                    "request_id": request_id, "cache_hit": False, "status": "error", "total_ms": total_ms,
+                    "cache_check_ms": stage.get("cache_check_ms"), "groq_ms": stage.get("groq_ms"),
+                    "gemini_ms": stage.get("gemini_ms"), "task_queue_ms": task_queue_ms,
+                },
             )
+        circuit_states = await cb.get_all_states()
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "All providers unavailable",
-                "circuit_states": cb.get_all_states(),
+                "circuit_states": circuit_states,
             }
         )
 
@@ -303,15 +310,17 @@ async def chat(
         response_preview=_truncate(result.get("content")),
     )
     task_queue_ms = int((time.monotonic() - task_start) * 1000)
-    print(f"[Async] Task queued in {task_queue_ms}ms")
+    logger.debug("task queued", extra={"request_id": request_id, "task_queue_ms": task_queue_ms})
 
     if settings.log_stage_timings:
         total_ms = int((time.monotonic() - wall_start) * 1000)
-        print(
-            "[Timing] "
-            f"id={request_id} cache_hit=false status={status} total_ms={total_ms} "
-            f"cache_check_ms={stage.get('cache_check_ms')} groq_ms={stage.get('groq_ms')} "
-            f"gemini_ms={stage.get('gemini_ms')} task_queue_ms={task_queue_ms}"
+        logger.info(
+            "chat request timing",
+            extra={
+                "request_id": request_id, "cache_hit": False, "status": status, "total_ms": total_ms,
+                "cache_check_ms": stage.get("cache_check_ms"), "groq_ms": stage.get("groq_ms"),
+                "gemini_ms": stage.get("gemini_ms"), "task_queue_ms": task_queue_ms,
+            },
         )
 
     return response_obj

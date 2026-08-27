@@ -69,8 +69,8 @@ async def _check_celery() -> dict:
     return {"status": "healthy", "queue_depth": queue_depth, "detail": "worker processing normally"}
 
 
-def _check_providers() -> dict:
-    states = cb.get_all_states()
+async def _check_providers() -> dict:
+    states = await cb.get_all_states()
     out = {}
     for provider in ("groq", "gemini"):
         s = states.get(provider, {"state": "closed", "failure_count": 0, "last_failure": 0.0})
@@ -99,10 +99,9 @@ async def get_system_health(db: AsyncSession) -> dict:
       provider circuit is open/half-open, or the Celery queue is backing up.
     - "healthy": every check passed.
     """
-    db_check, redis_check, celery_check = await asyncio.gather(
-        _check_database(db), _check_redis(), _check_celery()
+    db_check, redis_check, celery_check, provider_checks = await asyncio.gather(
+        _check_database(db), _check_redis(), _check_celery(), _check_providers()
     )
-    provider_checks = _check_providers()
 
     if db_check["status"] == "unhealthy" or redis_check["status"] == "unhealthy":
         overall = "unhealthy"
@@ -123,5 +122,5 @@ async def get_system_health(db: AsyncSession) -> dict:
             "celery": celery_check,
             "providers": provider_checks,
         },
-        "circuit_breakers": cb.get_all_states(),
+        "circuit_breakers": await cb.get_all_states(),
     }

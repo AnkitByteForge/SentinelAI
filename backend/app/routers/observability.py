@@ -1,20 +1,20 @@
 from datetime import datetime, timezone
+from typing import Optional
+
+import redis as redis_client
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
-import redis as redis_client
 
 from app.config import settings
 from app.db.database import get_db
 from app.models import LogsResponse, MetricsResponse
-from app.services.queries import get_logs, get_metrics
-from app.routers.gateway import verify_api_key   # reuse the same auth
+from app.routers.gateway import verify_api_key  # reuse the same auth
 from app.services.cache import get_cache_stats
 from app.services.circuit_breaker import registry as cb
+from app.services.cost import get_pricing_table
+from app.services.queries import get_logs, get_metrics
 from app.services.webhook import send_webhook
 from app.worker import celery_app
-
-from app.services.cost import get_pricing_table
 
 router = APIRouter()
 
@@ -67,6 +67,7 @@ async def invalidate_cache(
 ):
     """Mark all cache entries as stale. Useful for testing."""
     from sqlalchemy import update as sql_update
+
     from app.db.models import CacheEntry
     await db.execute(sql_update(CacheEntry).values(is_stale=True))
     await db.commit()
@@ -79,13 +80,13 @@ async def reset_circuit(
     _: str = Depends(verify_api_key),
 ):
     """Manually reset a circuit breaker — useful for testing and demos."""
-    cb.reset(provider)
+    await cb.reset(provider)
     return {"message": f"{provider} circuit reset to CLOSED"}
 
 @router.get("/v1/circuit/states")
 async def circuit_states(_: str = Depends(verify_api_key)):
     """Current state of all circuit breakers."""
-    return cb.get_all_states()
+    return await cb.get_all_states()
 
 
 @router.get("/v1/worker/stats")
@@ -114,7 +115,7 @@ async def worker_stats(_: str = Depends(verify_api_key)):
 
 @router.get("/v1/webhook/config")
 async def webhook_config(_: str = Depends(verify_api_key)):
-    """Returns whether a circuit-breaker webhook URL and signing secret are configured. Never exposes the secret itself."""
+    """Returns whether a webhook URL/secret are configured. Never exposes the secret itself."""
     return {
         "url_configured": bool(settings.webhook_url),
         "secret_configured": bool(settings.webhook_secret),
