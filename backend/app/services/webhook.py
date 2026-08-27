@@ -4,10 +4,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 
 import httpx
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _sign(payload_bytes: bytes) -> str | None:
@@ -39,5 +42,5 @@ async def send_webhook(payload: dict) -> dict:
             resp = await client.post(settings.webhook_url, content=body, headers=headers)
         return {"sent": True, "status_code": resp.status_code, "error": None}
     except Exception as e:
-        print(f"[Webhook] delivery to {settings.webhook_url} failed: {e}")
+        logger.warning("webhook delivery to %s failed: %s", settings.webhook_url, e)
         return {"sent": False, "status_code": None, "error": str(e)}

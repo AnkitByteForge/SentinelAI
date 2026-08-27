@@ -1,7 +1,13 @@
+import logging
+
 from celery import Celery
 from celery.signals import worker_init
 
 from app.config import settings
+from app.logging_config import configure_logging
+
+configure_logging(settings.log_level)
+logger = logging.getLogger(__name__)
 
 # ── Celery app instance ───────────────────────────────────────────────
 # broker  = where tasks are queued (Redis)
@@ -46,4 +52,4 @@ def _warmup_embeddings_on_worker_init(**_kwargs):
 
         warmup_embedding_model()
     except Exception as e:
-        print(f"[Embeddings] Warmup failed: {e}")
+        logger.error("embedding model warmup failed: %s", e)
