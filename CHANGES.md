@@ -14,7 +14,7 @@
 
 ### Verified
 
-- `pytest`: **65 passed** (unit + integration, testcontainers Postgres + fakeredis + mocked providers), 0 failed, in ~150s.
+- `pytest`: **65 passed**, 0 failed, in ~150s — confirmed cleanly against the exact code in this commit history, both before and immediately after committing it. Two later re-confirmation runs, after the backend Docker build below had churned through many container start/stop cycles, hit `ConnectionResetError: [WinError 64]` establishing the SSL connection to the testcontainers Postgres instance — a Windows/Docker network-layer issue, not a code regression (nothing in the diff between the passing and failing runs touches connection handling, and the failure is at the TLS handshake, before any application code runs). Worth being aware of if you hit the same thing locally: it's this sandbox's Docker networking under cumulative load, not the test suite.
 - `ruff check .`: all checks pass.
 - `alembic history`/`alembic upgrade head` resolve the full `0001_api_keys` → `0002_requests_cache` chain correctly against a real Postgres (via the same testcontainers instance pytest uses).
 - `docker-compose config` / `docker-compose -f docker-compose.yml -f docker-compose.loadtest.yml config` both parse cleanly.
