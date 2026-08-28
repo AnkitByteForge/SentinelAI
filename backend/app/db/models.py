@@ -22,7 +22,7 @@ class RequestLog(Base):
     fallback_from = Column(String,  nullable=True)
     prompt_preview  = Column(Text,  nullable=True)
     response_preview= Column(Text,  nullable=True)
-    created_at    = Column(DateTime, server_default=func.now())
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class CacheEntry(Base):
@@ -44,7 +44,7 @@ class CacheEntry(Base):
     hit_count     = Column(Integer, default=0)
     saved_cost_usd= Column(Float,   default=0.0)
     is_stale      = Column(Boolean, default=False)
-    created_at    = Column(DateTime, server_default=func.now())
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class ApiKey(Base):
