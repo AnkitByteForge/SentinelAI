@@ -10,8 +10,7 @@ from app.config import settings
 from app.db.database import Base
 
 # Import every model module so it registers on Base.metadata before autogenerate
-# or migrations run. api_keys is the only table Alembic actually manages today;
-# requests/cache_entries stay on the create_all() path in app/db/database.py.
+# or migrations run.
 from app.db.models import ApiKey, CacheEntry, RequestLog  # noqa: F401
 
 config = context.config
