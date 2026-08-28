@@ -9,6 +9,10 @@
 /frontend/.env.local
 /frontend/.env.*.local
 
+# Root .env — docker-compose host-port overrides for this machine only
+# (see .env.example for what it's for)
+/.env
+
 # Python (scripts/)
 __pycache__/
 *.py[cod]

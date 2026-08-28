@@ -277,9 +277,9 @@ docker-compose up -d
 
 | Service | Port | What it runs |
 |---|---|---|
-| `postgres` | `5432` | PostgreSQL 16 + pgvector |
+| `postgres` | `5432` | PostgreSQL 16 + pgvector. Containers reach it via the `postgres` service name regardless of the host port; if `5432` collides with something else already running locally, set `POSTGRES_HOST_PORT` in a root-level `.env` (see `.env.example`) instead of editing `docker-compose.yml` |
 | `redis` | `6379` | Celery broker/backend, API key cache, rate limiting |
-| `backend` | `8000` | `uvicorn app.main:app` — FastAPI gateway |
+| `backend` | `8000` | `uvicorn app.main:app` — FastAPI gateway. Same override pattern as postgres above (`BACKEND_HOST_PORT`) if `8000` collides |
 | `worker` | — | `celery -A app.worker worker --pool=solo` — log writes, cache stores, webhook delivery |
 | `frontend` | `3000` | `next start` — dashboard |
 
@@ -577,7 +577,7 @@ Set in `backend/.env` (see `backend/.env.example`).
 |---|---|---|---|
 | `GROQ_API_KEY` | Yes | `""` | API key for the primary provider (Groq) |
 | `GEMINI_API_KEY` | Yes | `""` | API key for the fallback provider (Gemini) |
-| `POSTGRES_URL` | Yes | `postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai` | Async SQLAlchemy connection string; this is what the engine actually uses |
+| `POSTGRES_URL` | Yes | `postgresql+asyncpg://sentinel:sentinel_dev_pass@localhost:5432/sentinelai` | Async SQLAlchemy connection string for host processes (bootstrap.py, manual scripts) — the backend/worker containers override this to use the internal `postgres` service name instead, see docker-compose.yml. Update the port here if you changed `POSTGRES_HOST_PORT` (see the repo root's `.env.example`) |
 | `DATABASE_URL` | No | `sqlite+aiosqlite:///./sentinelai.db` | Legacy SQLite URL from an earlier iteration; not used by the active engine |
 | `API_KEY` | Yes | `sentinel-dev-key-123` | Master admin key — always valid, required for `/v1/keys/*`; per-tenant keys are the normal `/v1/chat` auth path |
 | `ENVIRONMENT` | No | `development` | Informational — not currently branched on in code |

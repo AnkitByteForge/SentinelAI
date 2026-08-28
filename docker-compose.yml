@@ -26,7 +26,14 @@ services:
       - POSTGRES_PASSWORD=sentinel_dev_pass
       - POSTGRES_DB=sentinelai
     ports:
-      - "5432:5432"
+      # Host-side port only — used by host processes (scripts/bootstrap.py,
+      # psql, etc.), not by other containers, which reach this one via the
+      # "postgres" service name on the internal port (5432) regardless of
+      # what's mapped here. If 5432 collides with something else already
+      # running locally, set POSTGRES_HOST_PORT in a root-level .env
+      # (gitignored, docker-compose loads it automatically) instead of
+      # editing this file — and update POSTGRES_URL in backend/.env to match.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - sentinel-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -48,9 +55,22 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      # Same override pattern as postgres above (BACKEND_HOST_PORT in a
+      # root .env) — the container itself always listens on 8000
+      # regardless, which is what frontend's BACKEND_INTERNAL_URL=
+      # http://backend:8000 below actually uses.
+      - "${BACKEND_HOST_PORT:-8000}:8000"
     env_file: ./backend/.env
     environment:
+      # Override backend/.env's POSTGRES_URL/REDIS_URL*, which are tuned
+      # for host processes (bootstrap.py) and say "localhost" — inside
+      # this container that means the container itself, not the postgres/
+      # redis containers. Those are reachable by service name instead,
+      # always on their internal port regardless of any host port mapping.
+      - POSTGRES_URL=postgresql+asyncpg://sentinel:sentinel_dev_pass@postgres:5432/sentinelai
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       # Optional — leave unset to disable circuit-breaker webhook delivery.
       - WEBHOOK_URL=${WEBHOOK_URL:-}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
@@ -60,7 +80,11 @@ services:
       redis:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    mem_limit: 512m
+    # torch + sentence-transformers + the loaded embedding model run
+    # comfortably over 512m (measured ~460MB+ just at startup, before
+    # serving any request) — 512m was picked without actually load-testing
+    # it and left the container minutes away from an OOM kill.
+    mem_limit: 2g
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/live', timeout=3).status==200 else 1)"]
@@ -73,6 +97,10 @@ services:
     build: ./backend
     env_file: ./backend/.env
     environment:
+      - POSTGRES_URL=postgresql+asyncpg://sentinel:sentinel_dev_pass@postgres:5432/sentinelai
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - WEBHOOK_URL=${WEBHOOK_URL:-}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
     depends_on:
@@ -81,7 +109,12 @@ services:
       redis:
         condition: service_healthy
     command: celery -A app.worker worker --loglevel=info --pool=solo
-    mem_limit: 256m
+    # Same embedding-model memory footprint as backend above applies here
+    # too — worker.py's _warmup_embeddings_on_worker_init also preloads it
+    # when PRELOAD_EMBEDDING_MODEL=true, and store_in_cache()/check_cache()
+    # need it loaded either way whenever the worker actually processes a
+    # cache-store task. 256m was never going to be enough.
+    mem_limit: 1536m
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.worker inspect ping || exit 1"]
       interval: 30s
@@ -93,10 +126,16 @@ services:
     build: ./frontend
     ports:
       - "3000:3000"
+    env_file: ./frontend/.env.local
+    environment:
+      # Overrides .env.local's BACKEND_INTERNAL_URL (tuned for `next dev`
+      # on the host, where the backend really is at localhost:8000) —
+      # inside this container, the backend is only reachable by service
+      # name. SENTINEL_API_KEY comes through from .env.local as-is; it
+      # doesn't need to differ between host and container.
+      - BACKEND_INTERNAL_URL=http://backend:8000
     depends_on:
       - backend
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
 
 volumes:
   sentinel-postgres-data:
