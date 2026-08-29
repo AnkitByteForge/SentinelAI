@@ -86,7 +86,7 @@ flowchart TD
 
         GroqCB{"Groq circuit<br/>CLOSED / HALF_OPEN?"}
 
-        GroqCB -->|yes| GroqCall["Call Groq<br/>llama-3.1-8b-instant"]
+        GroqCB -->|yes| GroqCall["Call Groq<br/>openai/gpt-oss-20b"]
 
         GroqCB -->|no - OPEN| GeminiCB
 
@@ -245,7 +245,7 @@ No load test has been run against this deployment yet — the table below is the
 | Primary database | PostgreSQL (asyncpg driver) | Concurrent writes from the API process and Celery worker process require a real multi-writer database |
 | Vector search | pgvector (HNSW index) | Stores embeddings as a native Postgres column type and answers nearest-neighbor queries with an index instead of a client-side scan |
 | Embedding model | sentence-transformers — `all-MiniLM-L6-v2` | 384-dim, CPU-friendly, normalized embeddings suitable for cosine similarity; loaded once per process (optionally warmed at startup) |
-| LLM providers | Groq (`llama-3.1-8b-instant`), Gemini (`gemini-2.5-flash`) | Free-tier-friendly, OpenAI-compatible (Groq) and REST (Gemini) APIs used as primary/fallback pair |
+| LLM providers | Groq (`openai/gpt-oss-20b`), Gemini (`gemini-2.5-flash`) | Free-tier-friendly, OpenAI-compatible (Groq) and REST (Gemini) APIs used as primary/fallback pair |
 | Frontend | Next.js 14 (App Router) + Recharts | Single dashboard page polling the gateway's own observability endpoints; no separate backend-for-frontend |
 | Containerization | Docker + Docker Compose | `backend` and `frontend` each ship their own Dockerfile; see setup notes below on what compose does and doesn't start |
 
@@ -359,7 +359,7 @@ curl -X POST http://localhost:8000/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{"role": "user", "content": "Explain Redis in one sentence"}],
-    "model": "llama-3.1-8b-instant",
+    "model": "openai/gpt-oss-20b",
     "max_tokens": 200,
     "temperature": 0.7
   }'
@@ -370,7 +370,7 @@ curl -X POST http://localhost:8000/v1/chat \
   "id": "b2c1e8f0-...",
   "content": "Redis is an in-memory data store used as a cache, message broker, and database.",
   "provider": "groq",
-  "model": "llama-3.1-8b-instant",
+  "model": "openai/gpt-oss-20b",
   "usage": {"input_tokens": 14, "output_tokens": 19, "cost_usd": 0.0000023},
   "meta": {"cache_hit": false, "latency_ms": 812, "provider": "groq", "fallback": null}
 }

@@ -3,7 +3,9 @@
 PRICING = {
     "groq": {
         # Groq charges these rates — free tier gives credits, same calculation
-        "llama-3.1-8b-instant":   {"input": 0.05,  "output": 0.08},   # per 1M tokens
+        "openai/gpt-oss-20b":     {"input": 0.075, "output": 0.30},   # per 1M tokens — current default
+        # Retired by Groq (kept so cost lookups on old historical rows still resolve):
+        "llama-3.1-8b-instant":   {"input": 0.05,  "output": 0.08},
         "llama-3.1-70b-versatile":{"input": 0.59,  "output": 0.79},
         "llama-3.3-70b-versatile":{"input": 0.59,  "output": 0.79},
         "mixtral-8x7b-32768":     {"input": 0.24,  "output": 0.24},

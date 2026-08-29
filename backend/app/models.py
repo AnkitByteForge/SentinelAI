@@ -11,8 +11,11 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[Message]
-    model: Optional[str] = "llama-3.1-8b-instant"   # Groq default
-    max_tokens: Optional[int] = 1000
+    model: Optional[str] = "openai/gpt-oss-20b"   # Groq default — llama-3.1-8b-instant was retired by Groq
+    # Raised from 1000 — gpt-oss-20b supports up to 65,536, and callers were
+    # getting truncated responses on anything moderately long. Still well
+    # under Groq's free-tier 8,000 tokens/minute cap for a single request.
+    max_tokens: Optional[int] = 2048
     temperature: Optional[float] = 0.7
     bypass_cache: Optional[bool] = False
 
