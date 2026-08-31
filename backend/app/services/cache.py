@@ -124,14 +124,34 @@ async def store_in_cache(db: AsyncSession, messages: list[dict], response: dict)
     cache_text = _messages_to_text(messages)
     exact_hash = _prompt_hash(cache_text)
 
-    # Guard against duplicate inserts (race condition)
+    # Guard against duplicate inserts (race condition) — but a *stale* row
+    # (e.g. from /v1/cache/invalidate) must be refreshable, not permanently
+    # dead. Skipping unconditionally here meant an invalidated entry could
+    # never be re-cached: prompt_hash is unique, so a plain INSERT for the
+    # same exact prompt would conflict forever, and every future identical
+    # request would keep cache-missing (correctly, since is_stale rows are
+    # excluded from lookups) yet never succeed in re-caching either.
     existing = await db.execute(
         select(CacheEntry).where(CacheEntry.prompt_hash == exact_hash)
     )
-    if existing.scalar_one_or_none():
-        return
-
+    row = existing.scalar_one_or_none()
     embedding_vec = _embed(cache_text)
+
+    if row is not None:
+        if not row.is_stale:
+            return
+        row.prompt_text    = cache_text[:2000]
+        row.embedding      = embedding_vec
+        row.response_text  = response["content"]
+        row.provider       = response["provider"]
+        row.model          = response["model"]
+        row.input_tokens   = response["input_tokens"]
+        row.output_tokens  = response["output_tokens"]
+        row.hit_count      = 0
+        row.saved_cost_usd = 0.0
+        row.is_stale       = False
+        await db.commit()
+        return
 
     entry = CacheEntry(
         id            = str(uuid.uuid4()),

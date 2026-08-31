@@ -345,6 +345,72 @@ python scripts/loadtest_failover.py --host http://localhost:8000 --mock-host htt
 
 For a quick single-number check (cache hit rate, p95, cost saved) without installing Locust, `tests/load_test.py` is a smaller standalone script — see its docstring.
 
+## Deployment
+
+A live instance runs on this split, chosen to stay on free tiers end-to-end:
+
+| Piece | Where | Why |
+|---|---|---|
+| Frontend (Next.js dashboard) | Vercel | Zero-config Next.js hosting, its own free tier, deployed via `vercel --prod` |
+| Backend + worker + Postgres + Redis | A single AWS Lightsail VM (Ubuntu 24.04, 1GB RAM), via the same `docker-compose.yml` used locally | Free-tier PaaS options (Render, Fly.io) don't offer a free background-worker tier, and Celery genuinely needs a separate worker process — self-hosting the full compose stack on one box sidesteps that entirely instead of working around it |
+| TLS | [Caddy](https://caddyserver.com/), reverse-proxying to the backend container, cert via [sslip.io](https://sslip.io) | `sslip.io` maps `<ip>.sslip.io` back to `<ip>` — gets a real Let's Encrypt certificate on a bare IP with no domain purchase or DNS setup |
+
+### Reproducing it
+
+```bash
+# On the VM: swap first — a 1GB box will wedge (not cleanly OOM) building
+# the torch-based backend image without it
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# Docker, then the repo
+curl -fsSL https://get.docker.com | sudo sh   # or the manual apt steps in Docker's docs
+git clone https://github.com/AnkitByteForge/SentinelAI.git && cd SentinelAI
+
+# backend/.env — same shape as backend/.env.example, plus:
+#   PRELOAD_EMBEDDING_MODEL=false   (see note below)
+#   CORS_ALLOWED_ORIGINS=<your deployed frontend origin>
+
+sudo docker compose up -d postgres redis
+sudo docker compose build backend worker   # do this before `up`, not as part of it —
+sudo docker compose up -d backend worker   # keeps the memory-heavy torch install from
+                                            # overlapping with the containers starting
+sudo docker compose exec -T backend python -m alembic upgrade head
+
+# Caddy, for HTTPS on a bare IP
+sudo apt install caddy
+echo "<vm-ip-with-dashes>.sslip.io { reverse_proxy localhost:8000 }" | sudo tee /etc/caddy/Caddyfile
+sudo systemctl restart caddy
+```
+
+```bash
+# Frontend, from ./frontend
+vercel link --yes
+vercel env add BACKEND_INTERNAL_URL production   # https://<your-domain>
+vercel env add SENTINEL_API_KEY production        # a *scoped* key — see below, not the master API_KEY
+vercel --prod --yes
+```
+
+**Mint a scoped key for the public dashboard** rather than pointing `SENTINEL_API_KEY` at the master `API_KEY` — the frontend's proxy route injects whatever key it's given into every request a visitor triggers, so a low rate limit caps what anonymous traffic can do to your provider quota:
+
+```bash
+curl -X POST https://<your-domain>/v1/keys \
+  -H "Authorization: Bearer <master API_KEY>" -H "Content-Type: application/json" \
+  -d '{"name": "public-dashboard-demo", "rate_limit": 8}'
+```
+
+**1GB RAM is tight.** `PRELOAD_EMBEDDING_MODEL=false` matters more here than it does locally: the backend and worker are two separate processes that each load their own copy of the SentenceTransformer model, so preloading both at boot roughly doubles the startup memory spike on a box that's already running Postgres and Redis alongside them. Lazy-loading on first use spreads that same eventual footprint out instead of hitting it all at once — the swap file above is what actually keeps the box from wedging if a spike happens anyway.
+
+### Two real bugs this deployment surfaced
+
+Running the stack under real memory pressure and real background-task timing — instead of the generous local Docker setup and fast test suite — surfaced two genuine, pre-existing correctness bugs that hadn't shown up before:
+
+1. **A cross-event-loop bug in the Celery worker** (`app/tasks.py`'s `_run_async`): every task ran on a brand-new `asyncio` event loop, but `app/db/database.py`'s connection pool is a singleton shared across all of them — a connection checked back into the pool when one task's loop closed could get reused under a *different* loop on the next task, which asyncpg rejects outright. It fired intermittently (depending on pool churn), silently breaking request logging, cache writes, or `last_used` updates on whichever task happened to hit it. Fixed by disposing the engine's pool at the end of every task, forcing the next one to open fresh connections — the same fix already in place for the test suite's `conftest.py`, just never applied to the real worker process.
+2. **`/v1/cache/invalidate` permanently dead-ended any entry it touched**: it flagged rows `is_stale=True` without deleting them, but `store_in_cache`'s duplicate guard bailed out on *any* existing row for a given prompt hash — stale or not. Once invalidated, a prompt could never be re-cached: every future identical request would correctly cache-*miss* (stale rows are excluded from lookups) but then silently fail to re-cache, forever. Fixed by having the guard refresh a stale row in place instead of skipping it.
+
+Both are in `CHANGES.md` with the discovery path — a live "run this and watch it work" demo turned out to be a better bug-finder than the test suite for exactly the kind of timing- and resource-dependent issues that only show up under real conditions.
+
 ## API reference
 
 All endpoints except `/health`, `/health/live`, and `/health/ready` require `Authorization: Bearer <token>`. The token is either the master admin key (`API_KEY` in `.env` — always valid, required for `/v1/keys/*`) or a per-tenant key minted via `POST /v1/keys` (each with its own requests-per-minute limit). See `/docs` for the full OpenAPI reference, including `/v1/keys/*` (key management) and `/v1/webhook/*` (circuit-breaker webhook config/test).
@@ -591,7 +657,9 @@ See `backend/.env.example` for the full list, including the API key cache TTL, d
 
 ## What production would look like
 
-- **Postgres → managed** (RDS, Neon, or Railway Postgres) with pgvector enabled, instead of a local container
+The live deployment (see [Deployment](#deployment)) is a real, working instance — not a mockup — but it's one VM running the same `docker-compose.yml` as local dev, sized for a low-traffic portfolio demo rather than real load. What an actual production setup would change:
+
+- **Postgres → managed** (RDS, Neon, or Railway Postgres) with pgvector enabled, instead of a container on the same box as the app
 - **Redis → managed** (ElastiCache or Upstash) — already just a `REDIS_URL`/`CELERY_BROKER_URL` change, no code changes needed
 - **Multiple Celery workers** with the `prefork` pool (the current `solo` pool is a Windows-dev workaround, single-threaded by design)
 - **Key rotation reminders / expiry** — `POST /v1/keys/{id}/rotate` exists, but nothing currently prompts a tenant to rotate an old key

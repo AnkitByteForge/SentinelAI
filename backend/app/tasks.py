@@ -12,6 +12,18 @@ def _run_async(coro):
     try:
         return loop.run_until_complete(coro)
     finally:
+        # Every call gets a brand-new event loop, but app.db.database's
+        # async engine is a single pooled-connection singleton shared
+        # across every call in this process. A connection checked back
+        # into the pool when this loop closes would get reused under a
+        # DIFFERENT loop on the next task — asyncpg forbids that
+        # ("Task ... got Future ... attached to a different loop"),
+        # intermittently depending on pool churn. Same bug class already
+        # fixed for tests via conftest.py's _dispose_engine_between_tests;
+        # disposing here forces the next task to open fresh connections
+        # instead of reusing one bound to this closing loop.
+        from app.db.database import engine
+        loop.run_until_complete(engine.dispose())
         loop.close()
 
 

@@ -169,6 +169,32 @@ async function getWorkerStats(): Promise<WorkerStats | null> {
   } catch { return null }
 }
 
+// Fixed (not randomized) so repeated clicks — by this visitor or others —
+// actually land on the same semantic-cache entry after the first run,
+// producing a real cache hit rather than simulating one. Explicitly
+// bounded ("in one sentence") to keep demo responses fast and complete —
+// an earlier version left these open-ended and the model ran all the way
+// to the 2048-token cap, taking ~30s and cutting off mid-sentence.
+const DEMO_PROMPTS = [
+  'Explain what a circuit breaker pattern is, in one sentence.',
+  'Name one benefit of semantic caching for LLM APIs, in one sentence.',
+]
+
+async function postChat(content: string): Promise<{ ok: boolean; cacheHit: boolean; status?: number }> {
+  try {
+    const r = await fetch(`${BASE}/v1/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content }], max_tokens: 150 }),
+    })
+    if (!r.ok) return { ok: false, cacheHit: false, status: r.status }
+    const d = await r.json()
+    return { ok: true, cacheHit: !!d?.meta?.cache_hit }
+  } catch {
+    return { ok: false, cacheHit: false }
+  }
+}
+
 // ── Small UI pieces ───────────────────────────────────────────────────
 function Pill({ label, color }: { label: string; color: string }) {
   return (
@@ -228,6 +254,71 @@ function WorkerStatus({ stats }: { stats: WorkerStats | null }) {
       {queueDepth > 0 && (
         <span style={{ color: C.text, fontSize: 10 }}>
           queue: {queueDepth}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function DemoButton({ onDone }: { onDone: () => void }) {
+  const [state, setState] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [note, setNote] = useState('')
+
+  const run = async () => {
+    setState('running')
+    setNote('Sending live requests through the gateway…')
+
+    let anyOk = false
+    let sawCacheHit = false
+
+    for (const prompt of DEMO_PROMPTS) {
+      const res = await postChat(prompt)
+      if (res.status === 429) {
+        setState('error')
+        setNote('Demo key is rate-limited right now — try again in a minute.')
+        return
+      }
+      if (res.ok) {
+        anyOk = true
+        sawCacheHit = sawCacheHit || res.cacheHit
+      }
+    }
+
+    if (!anyOk) {
+      setState('error')
+      setNote('Request failed — the backend may be waking up, try again shortly.')
+      return
+    }
+
+    setState('done')
+    setNote(sawCacheHit ? 'Done — one response was served straight from cache.' : 'Done — see the pipeline below.')
+    onDone()
+    setTimeout(() => setState('idle'), 5000)
+  }
+
+  const color = state === 'error' ? C.rose : state === 'done' ? C.emerald : C.cyan
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <button
+        onClick={run}
+        disabled={state === 'running'}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '6px 14px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+          letterSpacing: '0.04em',
+          background: `${color}15`, border: `1px solid ${color}50`,
+          color, cursor: state === 'running' ? 'default' : 'pointer',
+          fontFamily: 'JetBrains Mono, monospace',
+          opacity: state === 'running' ? 0.7 : 1,
+          transition: 'all 0.15s',
+        }}
+      >
+        {state === 'running' ? '⟳ SENDING…' : '▶ RUN LIVE DEMO'}
+      </button>
+      {note && (
+        <span style={{ fontSize: 10, color: state === 'error' ? C.rose : C.dim, maxWidth: 220 }}>
+          {note}
         </span>
       )}
     </div>
@@ -1336,6 +1427,8 @@ export default function Dashboard() {
             </div>
 
             <WorkerStatus stats={workerStats} />
+
+            <DemoButton onDone={refresh} />
 
             {/* Time window */}
             <div style={{ display: 'flex', gap: 4 }}>
